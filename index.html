@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenApi</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside>
+        <div class="brand">
+          <div class="brand-title">
+            <button id="add-system" type="button" class="brand-add" title="添加系统" aria-label="添加系统">+</button>
+            <strong>OpenApi</strong>
+          </div>
+          <span id="brand-count"></span>
+        </div>
+        <div class="search-wrap">
+          <input id="search" type="search" placeholder="搜索系统、路径或用例" autocomplete="off" />
+          <kbd>⌘K</kbd>
+        </div>
+        <div id="system-list"></div>
+      </aside>
+      <section class="main">
+        <header class="top">
+          <div class="crumb">
+            <span id="crumb-domain"></span>
+            <strong id="crumb-name">OpenApi</strong>
+            <em id="crumb-count"></em>
+          </div>
+          <div class="top-actions">
+            <span id="save-dot" class="save-dot saved" title="已保存"></span>
+            <button id="config-toggle" type="button" class="secondary">环境</button>
+            <button id="import" type="button" class="secondary">导入</button>
+            <div class="pop-wrap">
+              <button id="settings-toggle" type="button" class="icon" title="设置" aria-label="设置">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+                  <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+                </svg>
+              </button>
+              <div id="settings" class="pop settings" hidden>
+                <section>
+                  <h4>外观</h4>
+                  <div class="segment" id="theme">
+                    <button type="button" data-theme="system">跟随系统</button>
+                    <button type="button" data-theme="light">浅色</button>
+                    <button type="button" data-theme="dark">深色</button>
+                  </div>
+                </section>
+                <section>
+                  <h4>curl 底色</h4>
+                  <div class="row">
+                    <input id="curl-bg" type="color" value="#17211d" />
+                    <button id="curl-bg-reset" type="button" class="ghost">恢复默认</button>
+                  </div>
+                </section>
+                <section>
+                  <h4>字号</h4>
+                  <div class="row stepper">
+                    <button id="curl-size-down" type="button" class="secondary" aria-label="缩小">−</button>
+                    <input id="curl-size" type="number" min="12" max="32" step="1" value="16" />
+                    <button id="curl-size-up" type="button" class="secondary" aria-label="放大">+</button>
+                  </div>
+                </section>
+                <section>
+                  <h4>数据位置</h4>
+                  <div class="row">
+                    <code id="data-dir"></code>
+                    <button id="open-data-dir" type="button" class="ghost">打开目录</button>
+                  </div>
+                  <p class="tip">每次启动自动备份到 backups/，保留 7 份。</p>
+                </section>
+                <section>
+                  <h4>备份</h4>
+                  <div class="row">
+                    <button id="backup-all" type="button" class="secondary">备份全部…</button>
+                    <button id="restore-all" type="button" class="secondary">从备份恢复…</button>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </header>
+        <div id="detail"></div>
+        <div id="config" class="config" hidden></div>
+        <p id="toast" class="toast" hidden></p>
+      </section>
+    </div>
+    <div id="ask" class="ask" hidden>
+      <div class="ask-box">
+        <h3 id="ask-title"></h3>
+        <p id="ask-text"></p>
+        <div class="row">
+          <button id="ask-cancel" type="button" class="secondary">取消</button>
+          <button id="ask-ok" type="button" class="primary">确定</button>
+        </div>
+      </div>
+    </div>
+    <div id="palette" class="palette" hidden>
+      <div class="palette-box">
+        <input id="palette-input" type="text" placeholder="输入系统名、路径或用例标题，支持 post: path: sys: # 前缀" autocomplete="off" spellcheck="false" />
+        <ul id="palette-list"></ul>
+      </div>
+    </div>
+    <div id="system-dialog" class="palette" hidden>
+      <form id="system-form" class="palette-box dialog">
+        <h3>添加系统</h3>
+        <label>系统名<input name="name" type="text" placeholder="如 scm-po-service" autocomplete="off" spellcheck="false" required /></label>
+        <div class="field">
+          <span>业务域</span>
+          <div id="domain-picks" class="picks"></div>
+          <input name="domain" type="text" placeholder="或输入新的业务域，留空按名称归类" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="row">
+          <button id="system-cancel" type="button" class="secondary">取消</button>
+          <button type="submit" class="primary">添加</button>
+        </div>
+      </form>
+    </div>
+    <div id="yapi" class="palette" hidden>
+      <form id="yapi-form" class="palette-box dialog">
+        <h3>从 YApi 导入到 <span id="yapi-target"></span></h3>
+        <label>YApi 地址<input name="base" type="text" placeholder="https://yapi.example.com" autocomplete="off" spellcheck="false" required /></label>
+        <label>项目 token<input name="token" type="password" placeholder="YApi 项目设置 → token 配置" autocomplete="off" required /></label>
+        <label>请求主机<input name="host" type="text" placeholder="留空用 YApi 项目环境里的第一个" autocomplete="off" spellcheck="false" /></label>
+        <p class="tip">按方法 + 路径比对，本地已有的接口跳过，不覆盖；项目环境会补进「环境」卡。</p>
+        <div class="row">
+          <button id="yapi-cancel" type="button" class="secondary">取消</button>
+          <button id="yapi-submit" type="submit" class="primary">导入</button>
+        </div>
+      </form>
+    </div>
+  </body>
+</html>

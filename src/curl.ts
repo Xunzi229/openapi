@@ -442,6 +442,65 @@ export function fullTime(timestamp: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/* 一条用例里的多条 curl */
+
+export interface CurlCommand {
+  line: number;
+  text: string;
+}
+
+export function curlCommands(source: string): CurlCommand[] {
+  const lines = source.split("\n");
+  const commands: CurlCommand[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    if (!/^\s*curl(\s|$)/i.test(lines[index])) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    const chunk: string[] = [];
+    let quote: "'" | '"' | null = null;
+    let continued = false;
+    while (index < lines.length) {
+      const line = lines[index];
+      chunk.push(line);
+      const state = scanCurlLine(line, quote);
+      quote = state.quote;
+      continued = state.continued;
+      index += 1;
+      if (!quote && !continued) {
+        break;
+      }
+    }
+    commands.push({ line: start, text: chunk.join("\n") });
+  }
+  return commands;
+}
+
+function scanCurlLine(line: string, quote: "'" | '"' | null): { quote: "'" | '"' | null; continued: boolean } {
+  for (let index = 0; index < line.length; index += 1) {
+    const ch = line[index];
+    if (quote) {
+      if (quote === '"' && ch === "\\") {
+        index += 1;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "\\" && index === line.length - 1) {
+      return { quote, continued: true };
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+    }
+  }
+  return { quote, continued: false };
+}
+
 /* 高亮 */
 
 function escapeHtml(text: string): string {
@@ -462,6 +521,7 @@ export function highlightShell(source: string, defined: Set<string>): string {
   const emit = (text: string) => markVariables(escapeHtml(text), defined);
   let html = "";
   let index = 0;
+  let lineStart = true;
   while (index < source.length) {
     const ch = source[index];
     if (ch === "'" || ch === '"') {
@@ -484,8 +544,15 @@ export function highlightShell(source: string, defined: Set<string>): string {
       }
       const word = source.slice(start, index);
       const cls = word === "curl" || word === "ab" ? "sh-cmd" : word.startsWith("-") ? "sh-flag" : "";
+      if (lineStart && word.toLowerCase() === "curl") {
+        html += '<span class="curl-mark">\u200b</span>';
+      }
+      lineStart = false;
       html += cls ? `<span class="${cls}">${emit(word)}</span>` : emit(word);
       continue;
+    }
+    if (ch === "\n") {
+      lineStart = true;
     }
     html += escapeHtml(ch);
     index += 1;

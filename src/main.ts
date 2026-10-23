@@ -26,6 +26,7 @@ import {
   ago,
   caseTitle,
   envFor,
+  curlCommands,
   formatCurl,
   fullTime,
   fuzzyScore,
@@ -54,6 +55,7 @@ type Theme = "system" | "light" | "dark";
 interface RunState {
   runId: string;
   running: boolean;
+  index: number;
   result?: RunResult;
   error?: string;
 }
@@ -2374,7 +2376,6 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
     copyTo = wrap;
   }
 
-  const run = button(runs.get(item.id)?.running ? "停止" : "运行", "", () => void runCase(system, item));
   const format = button(formatBackup.has(item.id) ? "还原" : "格式化", "", () => {
     if (formatBackup.has(item.id)) {
       item.content = formatBackup.get(item.id) ?? item.content;
@@ -2443,7 +2444,7 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
   if (copyTo) {
     head.append(copyTo);
   }
-  head.append(run, moreWrap);
+  head.append(moreWrap);
 
   const wrap = el("div", structureOpen.has(item.id) ? "shell-wrap with-structure" : "shell-wrap");
   const view = el("div", "shell-view");
@@ -2452,8 +2453,56 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
   area.dataset.case = item.id;
   area.spellcheck = false;
   area.value = item.content;
+  const syncRunButtons = () => {
+    const commands = curlCommands(area.value);
+    const count = Math.max(commands.length, 1);
+    const buttons = [...view.querySelectorAll<HTMLButtonElement>(".run-icon")];
+    while (buttons.length < count) {
+      const button = el("button", "run-icon");
+      button.type = "button";
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const index = Number(button.dataset.index ?? "0");
+        const list = curlCommands(area.value);
+        const source = list[index]?.text ?? area.value;
+        void runCase(system, item, index, source);
+      });
+      view.append(button);
+      buttons.push(button);
+    }
+    while (buttons.length > count) {
+      buttons.pop()?.remove();
+    }
+    buttons.forEach((button, index) => {
+      button.dataset.index = String(index);
+      paintRunIcon(button, item, index);
+    });
+  };
+  const placeRunButtons = () => {
+    if (!highlight.isConnected) {
+      return;
+    }
+    const buttons = [...view.querySelectorAll<HTMLButtonElement>(".run-icon")];
+    const marks = [...highlight.querySelectorAll<HTMLElement>(".curl-mark")];
+    const lineHeight = Number.parseFloat(getComputedStyle(highlight).lineHeight);
+    const hostTop = view.getBoundingClientRect().top;
+    buttons.forEach((button, index) => {
+      const mark = marks[index];
+      const word = mark?.nextElementSibling ?? mark;
+      if (!word || !Number.isFinite(lineHeight)) {
+        button.style.top = "14px";
+        return;
+      }
+      const rect = word.getBoundingClientRect();
+      const leading = Math.max(0, (lineHeight - rect.height) / 2);
+      button.style.top = `${rect.top - hostTop - leading}px`;
+    });
+  };
   const paint = () => {
     highlight.innerHTML = highlightShell(area.value, definedVariables(system));
+    syncRunButtons();
+    placeRunButtons();
+    requestAnimationFrame(placeRunButtons);
   };
   area.addEventListener("input", () => {
     item.content = area.value;
@@ -2573,25 +2622,33 @@ function focusCase(caseId: string) {
 
 /* 运行 */
 
-async function runCase(system: SystemItem, item: CaseItem) {
+async function runCase(system: SystemItem, item: CaseItem, index = 0, source = item.content) {
   const current = runs.get(item.id);
   if (current?.running) {
     void stopCommand(current.runId);
-    return;
+    if (current.index === index) {
+      return;
+    }
   }
-  const command = substitute(item.content, variablesFor(system)).trim();
+  const command = substitute(source, variablesFor(system)).trim();
   if (!command) {
     notify("用例是空的");
     return;
   }
   const runId = uid();
-  runs.set(item.id, { runId, running: true });
+  runs.set(item.id, { runId, running: true, index });
   paintRunPanel(item);
   try {
     const result = await runCommand(runId, command);
-    runs.set(item.id, { runId, running: false, result });
+    if (runs.get(item.id)?.runId !== runId) {
+      return;
+    }
+    runs.set(item.id, { runId, running: false, index, result });
   } catch (error) {
-    runs.set(item.id, { runId, running: false, error: String(error) });
+    if (runs.get(item.id)?.runId !== runId) {
+      return;
+    }
+    runs.set(item.id, { runId, running: false, index, error: String(error) });
   }
   paintRunPanel(item);
 }
@@ -2602,13 +2659,42 @@ function paintRunPanel(item: CaseItem) {
   if (existing) {
     existing.replaceWith(next);
   }
-  const box = detail.querySelector(`[data-case-box="${item.id}"]`);
-  const headButtons = box?.querySelectorAll<HTMLButtonElement>(".case-head button") ?? [];
-  for (const node of headButtons) {
-    if (node.textContent === "运行" || node.textContent === "停止") {
-      node.textContent = runs.get(item.id)?.running ? "停止" : "运行";
-    }
+  detail.querySelectorAll<HTMLButtonElement>(`[data-case-box="${item.id}"] .run-icon`).forEach((node) => {
+    paintRunIcon(node, item, Number(node.dataset.index ?? "0"));
+  });
+}
+
+function runIcon(running: boolean): SVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  if (running) {
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", "3.5");
+    rect.setAttribute("y", "3.5");
+    rect.setAttribute("width", "9");
+    rect.setAttribute("height", "9");
+    rect.setAttribute("rx", "1.5");
+    rect.setAttribute("fill", "currentColor");
+    svg.append(rect);
+  } else {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("fill", "currentColor");
+    path.setAttribute("d", "M5.2 2.8v10.4L13 8 5.2 2.8z");
+    svg.append(path);
   }
+  return svg;
+}
+
+function paintRunIcon(node: HTMLButtonElement, item: CaseItem, index = Number(node.dataset.index ?? "0")) {
+  const state = runs.get(item.id);
+  const running = Boolean(state?.running && state.index === index);
+  node.title = running ? "停止" : "运行这条";
+  node.setAttribute("aria-label", running ? "停止" : "运行这条");
+  node.classList.toggle("running", running);
+  node.replaceChildren(runIcon(running));
 }
 
 function renderRunPanel(item: CaseItem): HTMLElement {

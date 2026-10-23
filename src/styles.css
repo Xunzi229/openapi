@@ -1764,10 +1764,35 @@ button.domain em {
   background: var(--curl-bg);
 }
 
+.run-icon {
+  position: absolute;
+  z-index: 2;
+  left: 8px;
+  top: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: calc(var(--curl-font-size) * 1.65);
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sh-cmd);
+}
+
+.run-icon:hover {
+  background: rgba(127, 127, 127, 0.18);
+}
+
+.run-icon.running {
+  color: var(--danger);
+}
+
 .shell-highlight,
 .shell-input {
   margin: 0;
-  padding: 14px 16px;
+  padding: 14px 16px 14px 40px;
   border: 0;
   font-family: var(--mono);
   font-size: var(--curl-font-size);
@@ -1781,6 +1806,11 @@ button.domain em {
 .shell-highlight {
   color: var(--curl-fg);
   min-height: calc(var(--curl-font-size) * 1.65 * 3);
+}
+
+.shell-highlight .curl-mark {
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .shell-input {

@@ -37,6 +37,7 @@ pub fn parse_dir(root: &Path) -> Result<Library, String> {
                 name: name.clone(),
                 domain: domain_of(&name),
                 note: String::new(),
+                groups: Vec::new(),
                 links: Vec::new(),
                 variables: Vec::new(),
                 apis: Vec::new(),
@@ -213,8 +214,9 @@ fn collect_markdown(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> Result<(
             collect_markdown(&path, files)?;
             continue;
         }
-        if path.extension().is_some_and(|extension| extension == "md")
-            && !matches!(name.as_str(), "README.md" | "SERVICE_INDEX.md" | "DATA_INDEX.md")
+        let lower = name.to_ascii_lowercase();
+        if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            && !matches!(lower.as_str(), "readme.md" | "service_index.md" | "data_index.md")
         {
             files.push(path);
         }

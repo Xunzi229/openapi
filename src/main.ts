@@ -36,6 +36,8 @@ import {
   normalizeHost,
   parseQuery,
   parseStructure,
+  pathOf,
+  replaceCurlPath,
   substitute,
   swapHost,
   type Query,
@@ -66,6 +68,13 @@ let toastTimer = 0;
 let epoch = 0;
 let editingRow = "";
 let sidebarCursor = "";
+let methodFilter = "";
+let groupFilter: string | null = null;
+let groupsOpen = true;
+let creatingGroup = false;
+let focusGroupCreate = false;
+const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
+const modLabel = isApple ? "⌘" : "Ctrl";
 let configOpen = false;
 let noteEditingId = "";
 const structureOpen = new Set<string>();
@@ -115,7 +124,10 @@ function button(label: string, className: string, onClick: (event: MouseEvent) =
 
 function notify(text: string, sticky = false) {
   window.clearTimeout(toastTimer);
-  toast.textContent = text;
+  const body = document.querySelector("#toast-text") as HTMLElement;
+  const close = document.querySelector("#toast-close") as HTMLButtonElement;
+  body.textContent = text.replace(/([?&]token=)[^&\s]+/gi, "$1***");
+  close.hidden = !sticky;
   toast.hidden = false;
   toast.classList.toggle("error", sticky);
   toast.classList.remove("fade");
@@ -134,6 +146,8 @@ function hideToast() {
   window.clearTimeout(toastTimer);
   toast.hidden = true;
 }
+
+document.querySelector("#toast-close")?.addEventListener("click", () => hideToast());
 
 function setSaveState(state: "saved" | "saving" | "error", title?: string) {
   saveDot.className = `save-dot ${state}`;
@@ -211,6 +225,12 @@ function toggleCollapsed(domain: string) {
 }
 
 function selectSystem(id: string) {
+  if (id !== selectedId) {
+    methodFilter = "";
+    groupFilter = null;
+    creatingGroup = false;
+    groupsOpen = true;
+  }
   selectedId = id;
   if (id) {
     localStorage.setItem("selected-system-id", id);
@@ -226,9 +246,81 @@ function selectedSystem(): SystemItem | undefined {
 
 /* 搜索 */
 
+function domainOrder(): string[] {
+  const saved = readList("domain-order");
+  return saved.length > 0 ? saved : [...DOMAIN_ORDER];
+}
+
 function rank(domain: string): number {
-  const index = DOMAIN_ORDER.indexOf(domain);
-  return index === -1 ? DOMAIN_ORDER.length : index;
+  const order = domainOrder();
+  const index = order.indexOf(domain);
+  if (index !== -1) {
+    return index;
+  }
+  const preset = DOMAIN_ORDER.indexOf(domain);
+  return preset === -1 ? order.length + 1 : preset;
+}
+
+function renameDomain(from: string, to: string) {
+  const next = to.trim();
+  if (!next || next === from || from === "最近" || from === "收藏") {
+    return;
+  }
+  let count = 0;
+  for (const system of library.systems) {
+    if ((system.domain || "其他") === from) {
+      system.domain = next;
+      count += 1;
+    }
+  }
+  if (count === 0) {
+    return;
+  }
+  const collapsed = readCollapsed();
+  if (collapsed.delete(from)) {
+    collapsed.add(next);
+    writeList("collapsed-domains", [...collapsed]);
+  }
+  const order = domainOrder();
+  const fromIndex = order.indexOf(from);
+  const toIndex = order.indexOf(next);
+  if (fromIndex >= 0 && toIndex === -1) {
+    order[fromIndex] = next;
+  } else if (fromIndex >= 0) {
+    order.splice(fromIndex, 1);
+  } else if (toIndex === -1) {
+    order.push(next);
+  }
+  writeList("domain-order", order);
+  scheduleSave();
+}
+
+async function deleteDomain(domain: string) {
+  if (domain === "最近" || domain === "收藏" || domain === "其他") {
+    return;
+  }
+  const members = library.systems.filter((system) => (system.domain || "其他") === domain);
+  const ok = await confirmDelete(`删除业务域「${domain}」？其中 ${members.length} 个系统会归到「其他」，系统不会删。`);
+  if (!ok) {
+    return;
+  }
+  for (const system of members) {
+    system.domain = "其他";
+  }
+  const collapsed = readCollapsed();
+  collapsed.delete(domain);
+  writeList("collapsed-domains", [...collapsed]);
+  const order = domainOrder();
+  const index = order.indexOf(domain);
+  if (index >= 0) {
+    order.splice(index, 1);
+  }
+  if (!order.includes("其他")) {
+    order.push("其他");
+  }
+  writeList("domain-order", order);
+  scheduleSave();
+  render();
 }
 
 function searching(): boolean {
@@ -296,15 +388,22 @@ function sortedApis(system: SystemItem): ApiItem[] {
 }
 
 function visibleApis(system: SystemItem): ApiItem[] {
+  const applyMethod = (apis: ApiItem[]) => {
+    if (methodFilter === "star") {
+      return apis.filter((api) => api.starred);
+    }
+    return methodFilter ? apis.filter((api) => api.method.toLowerCase() === methodFilter) : apis;
+  };
+  const applyGroup = (apis: ApiItem[]) => (groupFilter === null ? apis : apis.filter((api) => groupName(api) === groupFilter));
   const apis = sortedApis(system);
   if (!searching()) {
-    return apis;
+    return applyGroup(applyMethod(apis));
   }
   const hits = apis.filter(apiMatches);
   if (hits.length > 0) {
-    return hits;
+    return applyGroup(applyMethod(hits));
   }
-  return systemTextMatches(system) || (query.sys && !(query.method || query.path || query.title || query.text)) ? apis : [];
+  return applyGroup(applyMethod(systemTextMatches(system) || (query.sys && !(query.method || query.path || query.title || query.text)) ? apis : []));
 }
 
 function syncSelection() {
@@ -377,6 +476,7 @@ function submitSystem(form: HTMLFormElement) {
     name,
     domain: typed || pickedDomain || domainOf(name),
     note: "",
+    groups: [],
     links: [],
     variables: [],
     apis: [],
@@ -494,6 +594,9 @@ function renderSidebar() {
       if (!collapsed.has("最近")) {
         for (const system of recent) {
           group.append(systemButton(system));
+          if (groupsOpen && system.id === selectedId && collapsed.has(system.domain || "其他")) {
+            group.append(systemGroupNav(system));
+          }
         }
       }
       systemList.append(group);
@@ -522,6 +625,8 @@ function renderSidebar() {
           for (const api of system.apis.filter(apiMatches)) {
             group.append(apiHit(system, api, false));
           }
+        } else if (groupsOpen && system.id === selectedId) {
+          group.append(systemGroupNav(system));
         }
       }
     }
@@ -533,22 +638,98 @@ function domainGroup(domain: string, count: number, folded: boolean): HTMLElemen
   const group = el("section", folded ? "group folded" : "group");
   const title = el("button", "domain");
   title.type = "button";
-  title.append(el("i"), el("span", "", domain), el("em", "", String(count)));
-  title.addEventListener("click", () => {
-    toggleCollapsed(domain);
-    renderSidebar();
+  const name = el("span", "", domain);
+  const editable = domain !== "最近" && domain !== "收藏";
+  if (editable) {
+    name.dataset.editable = "1";
+    name.title = "双击修改名称";
+  }
+  title.append(el("i"), name, el("em", "", String(count)));
+  let foldTimer = 0;
+  title.addEventListener("click", (event) => {
+    if (event.target !== name) {
+      toggleCollapsed(domain);
+      renderSidebar();
+      return;
+    }
+    window.clearTimeout(foldTimer);
+    foldTimer = window.setTimeout(() => {
+      toggleCollapsed(domain);
+      renderSidebar();
+    }, 180);
   });
-  group.append(title);
+  if (editable) {
+    name.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.clearTimeout(foldTimer);
+      editDomain(group, domain);
+    });
+  }
+  const row = el("div", "domain-row");
+  row.append(title);
+  if (editable) {
+    const actions = el("div", "domain-actions");
+    actions.append(button("改名", "mini", () => editDomain(group, domain)));
+    if (domain !== "其他") {
+      actions.append(button("删除", "mini danger", () => void deleteDomain(domain)));
+    }
+    row.append(actions);
+  }
+  group.append(row);
   return group;
 }
 
+function editDomain(group: HTMLElement, domain: string) {
+  const row = el("div", "domain-edit");
+  const input = el("input");
+  input.value = domain;
+  input.spellcheck = false;
+  row.append(input);
+  group.querySelector("button.domain")?.replaceWith(row);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (save: boolean) => {
+    if (done) {
+      return;
+    }
+    done = true;
+    if (save) {
+      renameDomain(domain, input.value);
+    }
+    render();
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
 function systemButton(system: SystemItem): HTMLButtonElement {
+  const open = system.id === selectedId && groupsOpen && !searching();
   const node = el("button", system.id === selectedId ? "system active" : "system");
   node.type = "button";
+  node.classList.toggle("open", open);
   node.dataset.key = `sys:${system.id}`;
   node.classList.toggle("kb", node.dataset.key === sidebarCursor);
-  node.append(el("span", "", system.name || "未命名"), el("em", "", String(system.apis.length)));
+  node.append(el("i"), el("span", "", system.name || "未命名"), el("em", "", String(system.apis.length)));
   node.addEventListener("click", () => {
+    if (!searching() && system.id === selectedId) {
+      groupsOpen = !groupsOpen;
+      if (!groupsOpen) {
+        groupFilter = null;
+        creatingGroup = false;
+      }
+      render();
+      return;
+    }
     selectSystem(system.id);
     resetOpenState();
     render();
@@ -676,9 +857,11 @@ function renderDetail() {
     return;
   }
   detail.append(renderSystemHead(system), renderNote(system), renderApiHead(system), renderCurlAdd(system));
-  for (const api of visibleApis(system)) {
-    detail.append(renderApi(system, api));
+  const apis = visibleApis(system);
+  if (apis.length === 0 && (methodFilter || searching())) {
+    detail.append(el("p", "filter-empty", methodFilter === "star" ? "没有星标接口" : methodFilter ? "这个方法下没有接口" : "没有匹配的接口"));
   }
+  appendApiGroups(system, apis);
   detail.scrollTop = scrollTop;
 }
 
@@ -1324,17 +1507,468 @@ function makeVariable(system: SystemItem, selected: string, name: string) {
   });
 }
 
+function groupName(api: ApiItem): string {
+  return (api.group || "").trim();
+}
+
+function ensureGroups(system: SystemItem) {
+  const next: string[] = [];
+  for (const name of system.groups || []) {
+    const trimmed = name.trim();
+    if (trimmed && !next.includes(trimmed)) {
+      next.push(trimmed);
+    }
+  }
+  for (const api of system.apis) {
+    const name = groupName(api);
+    if (name && !next.includes(name)) {
+      next.push(name);
+    }
+  }
+  system.groups = next;
+}
+
+function collapsedApiGroups(systemId: string): Set<string> {
+  return new Set(readList(`api-groups:${systemId}`));
+}
+
+function toggleApiGroup(systemId: string, name: string) {
+  const collapsed = collapsedApiGroups(systemId);
+  if (collapsed.has(name)) {
+    collapsed.delete(name);
+  } else {
+    collapsed.add(name);
+  }
+  writeList(`api-groups:${systemId}`, [...collapsed]);
+}
+
+function addGroup(system: SystemItem, raw: string): string {
+  const next = raw.trim();
+  if (!next) {
+    return "";
+  }
+  ensureGroups(system);
+  if (system.groups.includes(next)) {
+    notify("已有这个分组");
+    return "";
+  }
+  system.groups.push(next);
+  scheduleSave();
+  return next;
+}
+
+function renameApiGroup(system: SystemItem, from: string, to: string) {
+  const next = to.trim();
+  if (!next) {
+    notify("分组名不能为空");
+    return;
+  }
+  if (next === from) {
+    return;
+  }
+  ensureGroups(system);
+  if (system.groups.includes(next)) {
+    notify("已有这个分组");
+    return;
+  }
+  const index = system.groups.indexOf(from);
+  if (index >= 0) {
+    system.groups[index] = next;
+  }
+  for (const api of system.apis) {
+    if (groupName(api) === from) {
+      api.group = next;
+    }
+  }
+  const collapsed = collapsedApiGroups(system.id);
+  if (collapsed.delete(from)) {
+    collapsed.add(next);
+    writeList(`api-groups:${system.id}`, [...collapsed]);
+  }
+  if (groupFilter === from) {
+    groupFilter = next;
+  }
+  scheduleSave();
+}
+
+async function removeGroup(system: SystemItem, name: string) {
+  const count = system.apis.filter((api) => groupName(api) === name).length;
+  const ok = await confirmDelete(count ? `删除分组「${name}」？其中 ${count} 条接口会移到未分组。` : `删除分组「${name}」？`);
+  if (!ok) {
+    return;
+  }
+  system.groups = (system.groups || []).filter((item) => item !== name);
+  for (const api of system.apis) {
+    if (groupName(api) === name) {
+      api.group = "";
+      touchApi(api);
+    }
+  }
+  const collapsed = collapsedApiGroups(system.id);
+  if (collapsed.delete(name)) {
+    writeList(`api-groups:${system.id}`, [...collapsed]);
+  }
+  if (groupFilter === name) {
+    groupFilter = null;
+  }
+  scheduleSave();
+  render();
+}
+
+function openGroupCreate() {
+  if (!selectedSystem()) {
+    return;
+  }
+  creatingGroup = true;
+  focusGroupCreate = true;
+  setNavHidden(false);
+  render();
+}
+
+function bindGroupRename(input: HTMLInputElement, system: SystemItem, from: string) {
+  input.value = from;
+  input.spellcheck = false;
+  let done = false;
+  const finish = (save: boolean) => {
+    if (done) {
+      return;
+    }
+    done = true;
+    if (save) {
+      renameApiGroup(system, from, input.value);
+    }
+    render();
+  };
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+  input.focus();
+  input.select();
+}
+
+function startGroupRename(row: HTMLElement, system: SystemItem, name: string) {
+  const input = el("input");
+  row.querySelector("button")?.replaceWith(input);
+  bindGroupRename(input, system, name);
+}
+
+function groupCreateForm(system: SystemItem): HTMLFormElement {
+  const form = el("form", "group-create");
+  const input = el("input");
+  input.placeholder = "分组名称";
+  input.spellcheck = false;
+  const ok = el("button", "primary", "添加");
+  ok.type = "submit";
+  form.append(
+    input,
+    ok,
+    button("取消", "mini", () => {
+      creatingGroup = false;
+      render();
+    }),
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = addGroup(system, input.value);
+    if (!name) {
+      input.focus();
+      return;
+    }
+    creatingGroup = false;
+    groupFilter = name;
+    render();
+  });
+  return form;
+}
+
+function applyGroupOrder(system: SystemItem, visible: string[]) {
+  const next = [...system.groups];
+  const slots = visible.map((name) => next.indexOf(name)).filter((index) => index >= 0).sort((left, right) => left - right);
+  visible.forEach((name, index) => {
+    if (slots[index] !== undefined) {
+      next[slots[index]] = name;
+    }
+  });
+  system.groups = next;
+}
+
+function attachGroupDrag(row: HTMLElement, system: SystemItem, name: string) {
+  row.dataset.group = name;
+  const handle = el("span", "handle", "⋮⋮");
+  handle.title = "拖动排序";
+  handle.addEventListener("mousedown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const home = row.parentElement;
+    if (!home) {
+      return;
+    }
+    const block = () => {
+      const nodes = [row];
+      let next = row.nextElementSibling;
+      while (next && !next.classList.contains("api-group") && !next.classList.contains("group-nav") && !next.classList.contains("nav-add")) {
+        nodes.push(next as HTMLElement);
+        next = next.nextElementSibling;
+      }
+      return nodes;
+    };
+    const rows = () => [...home.querySelectorAll<HTMLElement>(":scope > [data-group]")];
+    row.classList.add("dragging");
+    document.body.classList.add("group-dragging");
+    const move = (ev: MouseEvent) => {
+      let hit: HTMLElement | null = null;
+      let after = false;
+      for (const item of rows()) {
+        if (item === row) {
+          continue;
+        }
+        const top = item.getBoundingClientRect().top;
+        let cursor = item.nextElementSibling;
+        while (cursor && !cursor.classList.contains("api-group") && !cursor.classList.contains("group-nav") && !cursor.classList.contains("nav-add")) {
+          cursor = cursor.nextElementSibling;
+        }
+        const bottom = cursor?.getBoundingClientRect().top ?? home.getBoundingClientRect().bottom;
+        if (ev.clientY >= top && ev.clientY < bottom) {
+          hit = item;
+          after = ev.clientY > (top + bottom) / 2;
+          break;
+        }
+      }
+      if (!hit) {
+        return;
+      }
+      let anchor: Element | null = hit;
+      if (after) {
+        anchor = hit.nextElementSibling;
+        while (anchor && !anchor.classList.contains("api-group") && !anchor.classList.contains("group-nav") && !anchor.classList.contains("nav-add")) {
+          anchor = anchor.nextElementSibling;
+        }
+      }
+      const nodes = block();
+      if (anchor && nodes.includes(anchor as HTMLElement)) {
+        return;
+      }
+      for (const node of nodes) {
+        home.insertBefore(node, anchor);
+      }
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.classList.remove("group-dragging");
+      const before = system.groups.join("\0");
+      applyGroupOrder(system, rows().map((item) => item.dataset.group || "").filter(Boolean));
+      if (system.groups.join("\0") === before) {
+        row.classList.remove("dragging");
+        return;
+      }
+      scheduleSave();
+      render();
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+  row.prepend(handle);
+}
+
+function groupNavItem(filter: string | null, label: string, count: number, system: SystemItem): HTMLElement {
+  const row = el("div", "group-nav");
+  const main = el("button", groupFilter === filter ? "on" : "");
+  main.type = "button";
+  main.append(el("span", "", label), el("em", "", String(count)));
+  main.addEventListener("click", () => {
+    groupFilter = filter;
+    render();
+  });
+  row.append(main);
+  if (filter) {
+    attachGroupDrag(row, system, filter);
+  }
+  if (filter) {
+    const actions = el("div", "group-nav-actions");
+    actions.append(
+      button("改名", "mini", () => startGroupRename(row, system, filter)),
+      button("删除", "mini danger", () => void removeGroup(system, filter)),
+    );
+    row.append(actions);
+  }
+  return row;
+}
+
+function systemGroupNav(system: SystemItem): HTMLElement {
+  ensureGroups(system);
+  const list = el("div", "nav-groups");
+  if (creatingGroup) {
+    list.append(groupCreateForm(system));
+  }
+  for (const name of system.groups) {
+    const count = system.apis.filter((api) => groupName(api) === name).length;
+    list.append(groupNavItem(name, name, count, system));
+  }
+  const loose = system.apis.filter((api) => !groupName(api)).length;
+  if (system.groups.length > 0 && loose > 0) {
+    list.append(groupNavItem("", "未分组", loose, system));
+  }
+  if (!creatingGroup) {
+    list.append(button("新建分组", "nav-add", () => openGroupCreate()));
+  }
+  if (focusGroupCreate) {
+    focusGroupCreate = false;
+    queueMicrotask(() => (list.querySelector(".group-create input") as HTMLInputElement | null)?.focus());
+  }
+  return list;
+}
+
+function appendApiGroups(system: SystemItem, apis: ApiItem[]) {
+  ensureGroups(system);
+  if (system.groups.length === 0 && groupFilter === null) {
+    for (const api of apis) {
+      detail.append(renderApi(system, api));
+    }
+    return;
+  }
+  const collapsed = collapsedApiGroups(system.id);
+  const names = groupFilter === null ? system.groups : groupFilter ? [groupFilter] : [];
+  const showEmpty = groupFilter !== null || (!searching() && !methodFilter);
+  for (const name of names) {
+    const members = apis.filter((api) => groupName(api) === name);
+    if (members.length === 0 && !showEmpty) {
+      continue;
+    }
+    const folded = groupFilter === null && collapsed.has(name);
+    detail.append(apiGroupHeader(system, name, members.length, folded));
+    if (!folded) {
+      for (const api of members) {
+        detail.append(renderApi(system, api));
+      }
+      if (members.length === 0) {
+        detail.append(el("p", "filter-empty", "这个分组里还没有接口"));
+      }
+    }
+  }
+  if (groupFilter === null && system.groups.length > 0) {
+    const loose = apis.filter((api) => !groupName(api));
+    if (loose.length > 0) {
+      const folded = collapsed.has("");
+      detail.append(apiGroupHeader(system, "", loose.length, folded));
+      if (!folded) {
+        for (const api of loose) {
+          detail.append(renderApi(system, api));
+        }
+      }
+    }
+  }
+  if (groupFilter === "") {
+    const loose = apis.filter((api) => !groupName(api));
+    detail.append(apiGroupHeader(system, "", loose.length, false));
+    for (const api of loose) {
+      detail.append(renderApi(system, api));
+    }
+    if (loose.length === 0 && !searching() && !methodFilter) {
+      detail.append(el("p", "filter-empty", "没有未分组的接口"));
+    }
+  }
+}
+
+function apiGroupHeader(system: SystemItem, name: string, count: number, folded: boolean): HTMLElement {
+  const row = el("div", folded ? "api-group folded" : "api-group");
+  const title = el("button", "api-group-toggle");
+  title.type = "button";
+  title.append(el("i"), el("span", "", name || "未分组"), el("em", "", String(count)));
+  title.addEventListener("click", () => {
+    toggleApiGroup(system.id, name);
+    renderDetail();
+  });
+  row.append(title);
+  if (name) {
+    attachGroupDrag(row, system, name);
+    const actions = el("div", "api-group-actions");
+    actions.append(
+      button("改名", "mini", () => startGroupRename(row, system, name)),
+      button("删除", "mini danger", () => void removeGroup(system, name)),
+    );
+    row.append(actions);
+  }
+  return row;
+}
+
+function groupButton(system: SystemItem, api: ApiItem): HTMLElement {
+  const wrap = el("span", "pop-wrap");
+  const pop = el("div", "pop");
+  pop.hidden = true;
+  pop.addEventListener("click", (event) => event.stopPropagation());
+  ensureGroups(system);
+  const assign = (name: string) => {
+    const next = name.trim();
+    if (next && !system.groups.includes(next)) {
+      system.groups.push(next);
+    }
+    api.group = next;
+    touchApi(api);
+    scheduleSave();
+    render();
+  };
+  pop.append(button(groupName(api) ? "未分组" : "✓ 未分组", "item", () => assign("")));
+  for (const name of system.groups) {
+    pop.append(button(groupName(api) === name ? `✓ ${name}` : name, "item", () => assign(name)));
+  }
+  const form = el("form", "group-new");
+  const input = el("input");
+  input.placeholder = "新分组";
+  input.spellcheck = false;
+  const save = el("button", "primary", "确定");
+  save.type = "submit";
+  form.append(input, save);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const next = input.value.trim();
+    if (!next) {
+      input.focus();
+      return;
+    }
+    assign(next);
+  });
+  pop.append(form);
+  const trigger = button("分组", "ghost", (event) => openPop(event.currentTarget as HTMLElement, pop));
+  wrap.append(trigger, pop);
+  return wrap;
+}
+
 /* 接口列表 */
 
 function renderApiHead(system: SystemItem): HTMLElement {
   const head = el("div", "api-head");
   const shown = visibleApis(system).length;
-  head.append(
-    el("h3", "", searching() && shown !== system.apis.length ? `接口 ${shown} / ${system.apis.length}` : `接口 ${system.apis.length}`),
-    el("div", "spacer"),
-    button("全部展开", "ghost", expandAll),
-    button("全部收起", "ghost", collapseAll),
-  );
+  const narrowed = searching() || Boolean(methodFilter) || groupFilter !== null;
+  head.append(el("h3", "", narrowed && shown !== system.apis.length ? `接口 ${shown} / ${system.apis.length}` : `接口 ${system.apis.length}`));
+  const filters = el("div", "method-filter");
+  const present = new Set(system.apis.map((api) => api.method.toUpperCase()));
+  const methods = ["", ...["GET", "POST", "PUT", "PATCH", "DELETE"].filter((method) => present.has(method))];
+  if (system.apis.some((api) => api.starred)) {
+    methods.push("STAR");
+  }
+  for (const method of methods) {
+    const value = method === "STAR" ? "star" : method.toLowerCase();
+    const active = methodFilter === value;
+    filters.append(
+      button(method === "STAR" ? "星标" : method || "全部", active ? "on" : "", () => {
+        methodFilter = value;
+        renderDetail();
+      }),
+    );
+  }
+  head.append(filters, el("div", "spacer"), button("新建分组", "ghost", () => openGroupCreate()), button("全部展开", "ghost", expandAll), button("全部收起", "ghost", collapseAll));
   return head;
 }
 
@@ -1343,7 +1977,7 @@ function renderCurlAdd(system: SystemItem): HTMLElement {
   const input = el("textarea", "curl-add-input");
   input.spellcheck = false;
   input.rows = 1;
-  input.placeholder = "粘贴一条 curl，⌘↵ 添加";
+  input.placeholder = `粘贴一条 curl，${modLabel}↵ 添加`;
   const actions = el("div", "actions");
   const submit = el("button", "primary", "添加接口");
   submit.type = "submit";
@@ -1391,6 +2025,7 @@ function renderCurlAdd(system: SystemItem): HTMLElement {
           method: parsed.method,
           path: parsed.path,
           note: "",
+          group: groupFilter ?? "",
           starred: false,
           updatedAt: Date.now(),
           cases: [],
@@ -1447,11 +2082,18 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
     render();
   }, api.starred ? "取消收藏" : "收藏");
   const badge = el("span", `method method-${api.method.toLowerCase()}`, api.method);
-  const path = el("code", "", api.path);
-  path.addEventListener("mousedown", (event) => event.stopPropagation());
-  path.addEventListener("click", (event) => event.stopPropagation());
+  const path = el("code", "path", api.path);
   const count = el("em", "", `${api.cases.length} 条用例`);
-  row.append(star, badge, path, count);
+  row.append(
+    star,
+    badge,
+    path,
+    button("复制", "mini", () => {
+      void copyText(api.path).then(() => notify("已复制路径"));
+    }),
+    button("编辑", "mini", () => openPathDialog(system, api)),
+    count,
+  );
 
   const target = mergeCandidate(system, api);
   if (target) {
@@ -1481,6 +2123,7 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
       void copyText(text).then(() => notify(`已复制 ${api.cases.length} 条用例`));
     }, "复制这个接口下的全部用例"),
     button("移动到…", "ghost", () => moveApi(system, api)),
+    groupButton(system, api),
     button("删除接口", "ghost danger", () => {
       void confirmDelete(`删除 ${api.method} ${api.path}？`).then((ok) => {
         if (!ok) {
@@ -1540,6 +2183,82 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
     article.append(body);
   }
   return article;
+}
+
+function cleanPath(input: string): string {
+  const trimmed = input.replace(/\s+/g, "");
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("/") || trimmed.includes("://") || trimmed.startsWith("{{")) {
+    return pathOf(trimmed);
+  }
+  return `/${trimmed.split(/[?#]/)[0]}`;
+}
+
+let pathTarget: { systemId: string; apiId: string } | null = null;
+
+function openPathDialog(system: SystemItem, api: ApiItem) {
+  pathTarget = { systemId: system.id, apiId: api.id };
+  const dialog = document.querySelector("#path-dialog") as HTMLElement;
+  const input = document.querySelector("#path-input") as HTMLTextAreaElement;
+  input.value = api.path;
+  dialog.hidden = false;
+  input.focus();
+  input.select();
+}
+
+function closePathDialog() {
+  pathTarget = null;
+  (document.querySelector("#path-dialog") as HTMLElement).hidden = true;
+}
+
+function submitPath(event: Event) {
+  event.preventDefault();
+  const target = pathTarget;
+  const input = document.querySelector("#path-input") as HTMLTextAreaElement;
+  const system = library.systems.find((item) => item.id === target?.systemId);
+  const api = system?.apis.find((item) => item.id === target?.apiId);
+  if (!system || !api) {
+    closePathDialog();
+    return;
+  }
+  const next = cleanPath(input.value);
+  if (!next) {
+    notify("路径不能为空");
+    input.focus();
+    return;
+  }
+  if (next === api.path) {
+    closePathDialog();
+    return;
+  }
+  if (system.apis.some((item) => item !== api && item.method === api.method && item.path === next)) {
+    notify("这个系统里已经有相同的方法和路径");
+    input.focus();
+    return;
+  }
+  const from = api.path;
+  let count = 0;
+  for (const item of api.cases) {
+    const updated = replaceCurlPath(item.content, from, next);
+    if (updated === item.content) {
+      continue;
+    }
+    item.content = updated;
+    item.updatedAt = Date.now();
+    count += 1;
+  }
+  api.path = next;
+  touchApi(api);
+  scheduleSave();
+  closePathDialog();
+  render();
+  if (api.cases.length > 0 && count === 0) {
+    notify("路径已改，用例里的地址没有对上");
+  } else if (count > 0) {
+    notify(`已替换 ${count} 条用例里的地址`);
+  }
 }
 
 function focusApiRow(apiId: string) {
@@ -2302,14 +3021,23 @@ async function submitYapi() {
 }
 
 function mergeYapi(system: SystemItem, project: { envs: LinkItem[]; apis: ApiItem[] }) {
+  ensureGroups(system);
   const existing = new Set(system.apis.map(normalizedKey));
   const fresh = new Map<string, ApiItem>();
   let added = 0;
   let skipped = 0;
   for (const api of project.apis) {
+    const incoming = groupName(api);
+    if (incoming && !system.groups.includes(incoming)) {
+      system.groups.push(incoming);
+    }
     const key = normalizedKey(api);
     if (existing.has(key)) {
       skipped += 1;
+      const local = system.apis.find((item) => normalizedKey(item) === key);
+      if (local && !groupName(local) && groupName(api)) {
+        local.group = groupName(api);
+      }
       continue;
     }
     const twin = fresh.get(key);
@@ -2581,20 +3309,32 @@ function initAppearance() {
 
 /* 菜单 */
 
+function setNavHidden(hidden: boolean) {
+  document.querySelector(".app")?.classList.toggle("nav-hidden", hidden);
+  localStorage.setItem("nav-hidden", hidden ? "1" : "0");
+}
+
+function toggleNav() {
+  const app = document.querySelector(".app");
+  setNavHidden(!app?.classList.contains("nav-hidden"));
+}
+
 function focusSearch() {
+  setNavHidden(false);
   search.focus();
   search.select();
 }
 
 const SHORTCUTS = [
-  "⌘K  聚焦搜索框，↑↓ 在结果里定位，↵ 进入",
-  "⌘P  快速跳转",
-  "⌘S  立刻保存",
-  "⌘⇧I  导入 Markdown",
-  "⌘= / ⌘-  放大缩小 curl 字号",
-  "⌘⇧E / ⌘⇧W  全部展开 / 全部收起",
-  "⌘↵  在粘贴框里添加接口",
-  "接口行：↑↓ 移动，→ 展开，← 收起，↵ 进入第一个用例，⌘C 复制路径",
+  `${modLabel}B  隐藏或显示侧栏`,
+  `${modLabel}K  聚焦搜索框，↑↓ 在结果里定位，↵ 进入`,
+  `${modLabel}P  快速跳转`,
+  `${modLabel}S  立刻保存`,
+  `${modLabel}⇧I  导入 Markdown`,
+  `${modLabel}= / ${modLabel}-  放大缩小 curl 字号`,
+  `${modLabel}⇧E / ${modLabel}⇧W  全部展开 / 全部收起`,
+  `${modLabel}↵  在粘贴框里添加接口`,
+  `接口行：↑↓ 移动，→ 展开，← 收起，↵ 进入第一个用例，${modLabel}C 复制路径`,
   "用例框：Esc 回到接口行",
   "搜索前缀：post:  path:  sys:  #标题",
 ].join("\n");
@@ -2665,7 +3405,52 @@ function handleMenu(id: string) {
 
 /* 启动 */
 
+function initNavResize() {
+  const app = document.querySelector(".app") as HTMLElement;
+  const handle = document.querySelector("#nav-resize") as HTMLElement;
+  const clamp = (width: number) => {
+    const max = Math.max(220, Math.min(720, window.innerWidth - 320));
+    return Math.round(Math.min(max, Math.max(180, width)));
+  };
+  const saved = Number(localStorage.getItem("nav-width"));
+  if (Number.isFinite(saved) && saved > 0) {
+    app.style.setProperty("--nav-width", `${clamp(saved)}px`);
+  }
+  handle.addEventListener("mousedown", (event) => {
+    if (event.button !== 0 || app.classList.contains("nav-hidden")) {
+      return;
+    }
+    event.preventDefault();
+    const aside = document.querySelector("aside") as HTMLElement;
+    const origin = aside.getBoundingClientRect().width;
+    const startX = event.clientX;
+    document.body.classList.add("nav-resizing");
+    const move = (ev: MouseEvent) => {
+      app.style.setProperty("--nav-width", `${clamp(origin + ev.clientX - startX)}px`);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.classList.remove("nav-resizing");
+      const width = Number.parseFloat(app.style.getPropertyValue("--nav-width"));
+      if (Number.isFinite(width)) {
+        localStorage.setItem("nav-width", String(Math.round(width)));
+      }
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+}
+
 function init() {
+  setNavHidden(localStorage.getItem("nav-hidden") === "1");
+  initNavResize();
+  document.querySelector("#nav-hide")?.addEventListener("click", toggleNav);
+  document.querySelector("#nav-show")?.addEventListener("click", toggleNav);
+  const searchKey = document.querySelector(".search-wrap kbd");
+  if (searchKey) {
+    searchKey.textContent = isApple ? "⌘K" : "Ctrl K";
+  }
   initAppearance();
   initPalette();
   onMenu(handleMenu);
@@ -2709,6 +3494,20 @@ function init() {
     }
   });
   document.querySelector("#system-cancel")?.addEventListener("click", () => closeSystemDialog());
+  document.querySelector("#path-form")?.addEventListener("submit", submitPath);
+  document.querySelector("#path-cancel")?.addEventListener("click", () => closePathDialog());
+  const pathDialog = document.querySelector("#path-dialog") as HTMLElement;
+  pathDialog.addEventListener("click", (event) => {
+    if (event.target === pathDialog) {
+      closePathDialog();
+    }
+  });
+  pathDialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePathDialog();
+    }
+  });
   systemDialog.addEventListener("click", (event) => {
     if (event.target === systemDialog) {
       closeSystemDialog();
@@ -2755,6 +3554,9 @@ function init() {
     if (key === "k") {
       event.preventDefault();
       focusSearch();
+    } else if (key === "b") {
+      event.preventDefault();
+      toggleNav();
     } else if (key === "p") {
       event.preventDefault();
       openPalette();
@@ -2767,6 +3569,9 @@ function init() {
   void loadLibrary()
     .then((loaded) => {
       library = loaded;
+      for (const system of library.systems) {
+        ensureGroups(system);
+      }
       const saved = localStorage.getItem("selected-system-id") ?? "";
       selectSystem(library.systems.some((system) => system.id === saved) ? saved : library.systems[0]?.id ?? "");
       setSaveState("saved");

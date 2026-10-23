@@ -36,6 +36,8 @@ pub struct System {
     #[serde(default)]
     pub note: String,
     #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
     pub links: Vec<Link>,
     #[serde(default)]
     pub variables: Vec<Variable>,
@@ -102,6 +104,9 @@ pub struct ApiEntry {
     pub path: String,
     #[serde(default)]
     pub note: String,
+    /// 空字符串表示未分组。
+    #[serde(default)]
+    pub group: String,
     #[serde(default)]
     pub starred: bool,
     #[serde(default)]
@@ -117,6 +122,7 @@ impl ApiEntry {
             method: method.to_string(),
             path: path.to_string(),
             note: String::new(),
+            group: String::new(),
             starred: false,
             updated_at: now_millis(),
             cases,

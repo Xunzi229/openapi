@@ -66,6 +66,9 @@ pub fn system_markdown(system: &System) -> String {
     }
     for api in &system.apis {
         out.push_str(&format!("## {} {}\n\n", api.method, api.path));
+        if !api.group.trim().is_empty() {
+            out.push_str(&format!("分组：{}\n\n", api.group.trim()));
+        }
         if !api.note.trim().is_empty() {
             out.push_str(api.note.trim());
             out.push_str("\n\n");
@@ -94,6 +97,7 @@ mod tests {
             name: "svc".to_string(),
             domain: "其他".to_string(),
             note: "说明".to_string(),
+            groups: Vec::new(),
             links: vec![Link {
                 id: "l".to_string(),
                 label: "TE".to_string(),

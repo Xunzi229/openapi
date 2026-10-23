@@ -9,6 +9,8 @@ export interface ApiItem {
   method: string;
   path: string;
   note: string;
+  /** 空字符串表示未分组。 */
+  group: string;
   starred: boolean;
   updatedAt: number;
   cases: CaseItem[];
@@ -37,6 +39,7 @@ export interface SystemItem {
   name: string;
   domain: string;
   note: string;
+  groups: string[];
   links: LinkItem[];
   variables: VariableItem[];
   apis: ApiItem[];

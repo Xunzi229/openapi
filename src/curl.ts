@@ -285,6 +285,44 @@ export function parseStructure(source: string): CurlStructure | { error: string 
   return { method, url, query, headers, body: bodyText, bodyJson };
 }
 
+export function pathOf(url: string): string {
+  const scheme = url.indexOf("://");
+  const rest = scheme === -1 ? url : url.slice(scheme + 3);
+  const slash = rest.indexOf("/");
+  const path = slash === -1 ? "/" : rest.slice(slash);
+  const cut = path.split(/[?#]/, 1)[0] ?? "/";
+  return cut || "/";
+}
+
+function samePath(left: string, right: string): boolean {
+  const trim = (path: string) => (path.length > 1 ? path.replace(/\/+$/, "") : path);
+  return trim(left) === trim(right);
+}
+
+/** 只改请求地址里的路径，主机和查询参数保留。对不上的 curl 原样返回。 */
+export function replaceCurlPath(source: string, fromPath: string, toPath: string): string {
+  const parsed = parseStructure(source);
+  if ("error" in parsed) {
+    return source;
+  }
+  const path = pathOf(parsed.url);
+  if (!samePath(path, fromPath)) {
+    return source;
+  }
+  const mark = parsed.url.search(/[?#]/);
+  const head = mark === -1 ? parsed.url : parsed.url.slice(0, mark);
+  const tail = mark === -1 ? "" : parsed.url.slice(mark);
+  if (!head.endsWith(path)) {
+    return source;
+  }
+  const nextUrl = head.slice(0, head.length - path.length) + toPath + tail;
+  const index = source.indexOf(parsed.url);
+  if (index === -1) {
+    return source;
+  }
+  return source.slice(0, index) + nextUrl + source.slice(index + parsed.url.length);
+}
+
 function safeDecode(text: string): string {
   try {
     return decodeURIComponent(text.replace(/\+/g, " "));

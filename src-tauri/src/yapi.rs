@@ -38,38 +38,45 @@ pub fn fetch(base: &str, token: &str, host: &str) -> Result<YapiProject, String>
     let interfaces = fetch_interfaces(&agent, base, pid, token)?;
     let apis = interfaces
         .iter()
-        .filter_map(|item| interface_to_api(item, &host, &basepath))
+        .filter_map(|(group, item)| interface_to_api(item, &host, &basepath, group))
         .collect();
     Ok(YapiProject { name, basepath, envs, apis })
 }
 
-fn fetch_interfaces(agent: &ureq::Agent, base: &str, pid: i64, token: &str) -> Result<Vec<Value>, String> {
+fn fetch_interfaces(agent: &ureq::Agent, base: &str, pid: i64, token: &str) -> Result<Vec<(String, Value)>, String> {
     let full = format!("{base}/api/open/plugin/export-full?type=json&pid={pid}&status=all&token={token}");
     if let Ok(Value::Array(cats)) = get_json(agent, &full) {
-        let list: Vec<Value> = cats
+        let list = cats
             .iter()
-            .filter_map(|cat| cat.get("list").and_then(Value::as_array))
-            .flatten()
-            .cloned()
-            .collect();
+            .flat_map(|cat| {
+                let group = text(cat, "name");
+                cat.get("list")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(move |item| (group.clone(), item.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         if !list.is_empty() {
             return Ok(list);
         }
     }
     let menu = get_data(agent, &format!("{base}/api/interface/list_menu?project_id={pid}&token={token}"))?;
-    let ids: Vec<i64> = menu
-        .as_array()
-        .map(|cats| {
-            cats.iter()
-                .filter_map(|cat| cat.get("list").and_then(Value::as_array))
-                .flatten()
-                .filter_map(|item| item.get("_id").and_then(Value::as_i64))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut list = Vec::with_capacity(ids.len());
-    for id in ids {
-        list.push(get_data(agent, &format!("{base}/api/interface/get?id={id}&token={token}"))?);
+    let cats = menu.as_array().cloned().unwrap_or_default();
+    let mut list = Vec::new();
+    for cat in cats {
+        let group = text(&cat, "name");
+        let ids: Vec<i64> = cat
+            .get("list")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("_id").and_then(Value::as_i64))
+            .collect();
+        for id in ids {
+            list.push((group.clone(), get_data(agent, &format!("{base}/api/interface/get?id={id}&token={token}"))?));
+        }
     }
     Ok(list)
 }
@@ -121,7 +128,7 @@ fn envs_of(project: &Value) -> Vec<Link> {
         .unwrap_or_default()
 }
 
-fn interface_to_api(item: &Value, host: &str, basepath: &str) -> Option<ApiEntry> {
+fn interface_to_api(item: &Value, host: &str, basepath: &str, group: &str) -> Option<ApiEntry> {
     let method = text(item, "method").to_uppercase();
     let mut path = text(item, "path");
     if method.is_empty() || path.is_empty() {
@@ -210,7 +217,9 @@ fn interface_to_api(item: &Value, host: &str, basepath: &str) -> Option<ApiEntry
     }
 
     lines.push(parts.join(" \\\n  "));
-    Some(ApiEntry::new(&method, &full_path, vec![Case::new(lines.join("\n"))]))
+    let mut api = ApiEntry::new(&method, &full_path, vec![Case::new(lines.join("\n"))]);
+    api.group = group.trim().to_string();
+    Some(api)
 }
 
 fn quote(text: &str) -> String {
@@ -267,7 +276,8 @@ mod tests {
             "req_body_is_json_schema": true,
             "req_body_other": "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}}}"
         });
-        let api = interface_to_api(&item, "https://a.com", "/api").unwrap();
+        let api = interface_to_api(&item, "https://a.com", "/api", "用户").unwrap();
+        assert_eq!(api.group, "用户");
         assert_eq!(api.method, "POST");
         assert_eq!(api.path, "/api/user/7");
         let content = &api.cases[0].content;
@@ -281,14 +291,14 @@ mod tests {
     #[test]
     fn builds_form_and_get() {
         let get = json!({"method": "GET", "path": "/ping", "req_body_type": "form"});
-        let api = interface_to_api(&get, "http://h", "").unwrap();
+        let api = interface_to_api(&get, "http://h", "", "").unwrap();
         assert_eq!(api.cases[0].content, "curl --location 'http://h/ping'");
 
         let form = json!({
             "method": "POST", "path": "/up", "req_body_type": "form",
             "req_body_form": [{"name": "file", "example": "it's"}]
         });
-        let api = interface_to_api(&form, "http://h", "").unwrap();
+        let api = interface_to_api(&form, "http://h", "", "").unwrap();
         assert!(api.cases[0].content.contains("--form 'file=it'\\''s'"));
     }
 

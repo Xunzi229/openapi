@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS systems (
     name TEXT NOT NULL,
     domain TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '',
+    groups TEXT NOT NULL DEFAULT '[]',
     position INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS links (
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS apis (
     method TEXT NOT NULL,
     path TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '',
+    api_group TEXT NOT NULL DEFAULT '',
     starred INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL DEFAULT 0,
     position INTEGER NOT NULL
@@ -58,10 +60,12 @@ CREATE INDEX IF NOT EXISTS idx_cases_api ON cases(api_id, position);
 ";
 
 const COLUMNS: &[(&str, &str, &str)] = &[
+    ("systems", "groups", "TEXT NOT NULL DEFAULT '[]'"),
     ("links", "kind", "TEXT NOT NULL DEFAULT 'doc'"),
     ("links", "host", "TEXT NOT NULL DEFAULT ''"),
     ("links", "note", "TEXT NOT NULL DEFAULT ''"),
     ("apis", "note", "TEXT NOT NULL DEFAULT ''"),
+    ("apis", "api_group", "TEXT NOT NULL DEFAULT ''"),
     ("apis", "starred", "INTEGER NOT NULL DEFAULT 0"),
     ("apis", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
     ("cases", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
@@ -127,17 +131,23 @@ fn read_library(conn: &Connection) -> Result<Library, String> {
     Ok(Library { systems })
 }
 
+fn read_groups(text: &str) -> Vec<String> {
+    serde_json::from_str(text).unwrap_or_default()
+}
+
 fn query_systems(conn: &Connection) -> Result<Vec<System>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, name, domain, note FROM systems ORDER BY position")
+        .prepare("SELECT id, name, domain, note, groups FROM systems ORDER BY position")
         .map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map([], |row| {
+            let groups: String = row.get(4)?;
             Ok(System {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 domain: row.get(2)?,
                 note: row.get(3)?,
+                groups: read_groups(&groups),
                 links: Vec::new(),
                 variables: Vec::new(),
                 apis: Vec::new(),
@@ -189,7 +199,7 @@ fn query_variables(conn: &Connection, system_id: &str) -> Result<Vec<Variable>, 
 
 fn query_apis(conn: &Connection, system_id: &str) -> Result<Vec<ApiEntry>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, method, path, note, starred, updated_at FROM apis WHERE system_id = ?1 ORDER BY position")
+        .prepare("SELECT id, method, path, note, api_group, starred, updated_at FROM apis WHERE system_id = ?1 ORDER BY position")
         .map_err(|error| error.to_string())?;
     let mut apis = stmt
         .query_map([system_id], |row| {
@@ -198,8 +208,9 @@ fn query_apis(conn: &Connection, system_id: &str) -> Result<Vec<ApiEntry>, Strin
                 method: row.get(1)?,
                 path: row.get(2)?,
                 note: row.get(3)?,
-                starred: row.get::<_, i64>(4)? != 0,
-                updated_at: row.get(5)?,
+                group: row.get(4)?,
+                starred: row.get::<_, i64>(5)? != 0,
+                updated_at: row.get(6)?,
                 cases: Vec::new(),
             })
         })
@@ -238,8 +249,15 @@ fn write_library(conn: &Connection, library: &Library) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     for (system_index, system) in library.systems.iter().enumerate() {
         tx.execute(
-            "INSERT INTO systems (id, name, domain, note, position) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![system.id, system.name, system.domain, system.note, system_index as i64],
+            "INSERT INTO systems (id, name, domain, note, groups, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                system.id,
+                system.name,
+                system.domain,
+                system.note,
+                serde_json::to_string(&system.groups).unwrap_or_else(|_| "[]".to_string()),
+                system_index as i64
+            ],
         )
         .map_err(|error| error.to_string())?;
         for (link_index, link) in system.links.iter().enumerate() {
@@ -275,13 +293,14 @@ fn write_library(conn: &Connection, library: &Library) -> Result<(), String> {
         }
         for (api_index, api) in system.apis.iter().enumerate() {
             tx.execute(
-                "INSERT INTO apis (id, system_id, method, path, note, starred, updated_at, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO apis (id, system_id, method, path, note, api_group, starred, updated_at, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     api.id,
                     system.id,
                     api.method,
                     api.path,
                     api.note,
+                    api.group,
                     api.starred as i64,
                     api.updated_at,
                     api_index as i64
@@ -413,6 +432,7 @@ mod tests {
                 name: "scm-po-service".to_string(),
                 domain: "供应链".to_string(),
                 note: "采购订单".to_string(),
+                groups: vec!["用户".to_string()],
                 links: vec![Link {
                     id: "l1".to_string(),
                     label: "TE".to_string(),
@@ -433,6 +453,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/api/purchase-order/po-detail".to_string(),
                     note: "幂等".to_string(),
+                    group: String::new(),
                     starred: true,
                     updated_at: 5,
                     cases: vec![
@@ -491,6 +512,7 @@ mod tests {
         let links = &library.systems[0].links;
         assert_eq!(links[0].kind, "env");
         assert_eq!(links[1].kind, "doc");
+        assert!(library.systems[0].groups.is_empty());
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
     }

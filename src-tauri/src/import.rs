@@ -38,6 +38,7 @@ pub fn parse_dir(root: &Path) -> Result<Library, String> {
                 domain: domain_of(&name),
                 note: String::new(),
                 groups: Vec::new(),
+                color: String::new(),
                 links: Vec::new(),
                 variables: Vec::new(),
                 apis: Vec::new(),

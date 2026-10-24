@@ -40,6 +40,8 @@ export interface SystemItem {
   domain: string;
   note: string;
   groups: string[];
+  /** 系统名标签色，空字符串表示默认。 */
+  color: string;
   links: LinkItem[];
   variables: VariableItem[];
   apis: ApiItem[];

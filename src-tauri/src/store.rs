@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS systems (
     domain TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '',
     groups TEXT NOT NULL DEFAULT '[]',
+    color TEXT NOT NULL DEFAULT '',
     position INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS links (
@@ -61,6 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_cases_api ON cases(api_id, position);
 
 const COLUMNS: &[(&str, &str, &str)] = &[
     ("systems", "groups", "TEXT NOT NULL DEFAULT '[]'"),
+    ("systems", "color", "TEXT NOT NULL DEFAULT ''"),
     ("links", "kind", "TEXT NOT NULL DEFAULT 'doc'"),
     ("links", "host", "TEXT NOT NULL DEFAULT ''"),
     ("links", "note", "TEXT NOT NULL DEFAULT ''"),
@@ -137,7 +139,7 @@ fn read_groups(text: &str) -> Vec<String> {
 
 fn query_systems(conn: &Connection) -> Result<Vec<System>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, name, domain, note, groups FROM systems ORDER BY position")
+        .prepare("SELECT id, name, domain, note, groups, color FROM systems ORDER BY position")
         .map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -148,6 +150,7 @@ fn query_systems(conn: &Connection) -> Result<Vec<System>, String> {
                 domain: row.get(2)?,
                 note: row.get(3)?,
                 groups: read_groups(&groups),
+                color: row.get(5)?,
                 links: Vec::new(),
                 variables: Vec::new(),
                 apis: Vec::new(),
@@ -249,13 +252,14 @@ fn write_library(conn: &Connection, library: &Library) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     for (system_index, system) in library.systems.iter().enumerate() {
         tx.execute(
-            "INSERT INTO systems (id, name, domain, note, groups, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO systems (id, name, domain, note, groups, color, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 system.id,
                 system.name,
                 system.domain,
                 system.note,
                 serde_json::to_string(&system.groups).unwrap_or_else(|_| "[]".to_string()),
+                system.color,
                 system_index as i64
             ],
         )
@@ -433,6 +437,7 @@ mod tests {
                 domain: "供应链".to_string(),
                 note: "采购订单".to_string(),
                 groups: vec!["用户".to_string()],
+                color: String::new(),
                 links: vec![Link {
                     id: "l1".to_string(),
                     label: "TE".to_string(),
@@ -513,6 +518,7 @@ mod tests {
         assert_eq!(links[0].kind, "env");
         assert_eq!(links[1].kind, "doc");
         assert!(library.systems[0].groups.is_empty());
+        assert!(library.systems[0].color.is_empty());
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
     }

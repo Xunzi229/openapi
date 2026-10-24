@@ -98,6 +98,7 @@ mod tests {
             domain: "其他".to_string(),
             note: "说明".to_string(),
             groups: Vec::new(),
+            color: String::new(),
             links: vec![Link {
                 id: "l".to_string(),
                 label: "TE".to_string(),

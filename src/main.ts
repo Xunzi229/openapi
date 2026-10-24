@@ -62,6 +62,7 @@ interface RunState {
 
 let library: Library = { systems: [] };
 let selectedId = "";
+let domainView = "";
 const openApiIds = new Set<string>();
 const closedApiIds = new Set<string>();
 let query: Query = parseQuery("");
@@ -227,6 +228,9 @@ function toggleCollapsed(domain: string) {
 }
 
 function selectSystem(id: string) {
+  if (id) {
+    domainView = "";
+  }
   if (id !== selectedId) {
     methodFilter = "";
     groupFilter = null;
@@ -294,6 +298,9 @@ function renameDomain(from: string, to: string) {
     order.push(next);
   }
   writeList("domain-order", order);
+  if (domainView === from) {
+    domainView = next;
+  }
   scheduleSave();
 }
 
@@ -321,6 +328,9 @@ async function deleteDomain(domain: string) {
     order.push("其他");
   }
   writeList("domain-order", order);
+  if (domainView === domain) {
+    domainView = "其他";
+  }
   scheduleSave();
   render();
 }
@@ -409,7 +419,7 @@ function visibleApis(system: SystemItem): ApiItem[] {
 }
 
 function syncSelection() {
-  if (!searching()) {
+  if (!searching() || domainView) {
     return;
   }
   const visible = orderedSystems(library.systems.filter(matches));
@@ -479,6 +489,7 @@ function submitSystem(form: HTMLFormElement) {
     domain: typed || pickedDomain || domainOf(name),
     note: "",
     groups: [],
+    color: "",
     links: [],
     variables: [],
     apis: [],
@@ -541,6 +552,7 @@ function expandAll() {
   for (const api of system.apis) {
     openApiIds.add(api.id);
   }
+  writeList(`api-groups:${system.id}`, []);
   renderDetail();
 }
 
@@ -553,6 +565,12 @@ function collapseAll() {
   for (const api of system.apis) {
     closedApiIds.add(api.id);
   }
+  ensureGroups(system);
+  const names = [...system.groups];
+  if (system.apis.some((api) => !groupName(api))) {
+    names.push("");
+  }
+  writeList(`api-groups:${system.id}`, names);
   renderDetail();
 }
 
@@ -577,11 +595,13 @@ function render() {
 }
 
 function renderSidebar() {
+  const scrollTop = systemList.scrollTop;
   systemList.replaceChildren();
   brandCount.textContent = `${library.systems.length} 个系统`;
   const visible = orderedSystems(library.systems.filter(matches));
   if (visible.length === 0) {
     systemList.append(el("p", "domain", library.systems.length === 0 ? "还没有系统" : "没有匹配的系统"));
+    systemList.scrollTop = scrollTop;
     return;
   }
 
@@ -596,7 +616,7 @@ function renderSidebar() {
       if (!collapsed.has("最近")) {
         for (const system of recent) {
           group.append(systemButton(system));
-          if (groupsOpen && system.id === selectedId && collapsed.has(system.domain || "其他")) {
+          if (!domainView && groupsOpen && system.id === selectedId && collapsed.has(system.domain || "其他") && (system.groups.length > 0 || creatingGroup)) {
             group.append(systemGroupNav(system));
           }
         }
@@ -627,13 +647,14 @@ function renderSidebar() {
           for (const api of system.apis.filter(apiMatches)) {
             group.append(apiHit(system, api, false));
           }
-        } else if (groupsOpen && system.id === selectedId) {
+        } else if (!domainView && groupsOpen && system.id === selectedId && (system.groups.length > 0 || creatingGroup)) {
           group.append(systemGroupNav(system));
         }
       }
     }
     systemList.append(group);
   }
+  systemList.scrollTop = scrollTop;
 }
 
 function domainGroup(domain: string, count: number, folded: boolean): HTMLElement {
@@ -647,24 +668,26 @@ function domainGroup(domain: string, count: number, folded: boolean): HTMLElemen
     name.title = "双击修改名称";
   }
   title.append(el("i"), name, el("em", "", String(count)));
-  let foldTimer = 0;
+  if (domainView === domain) {
+    title.classList.add("on");
+  }
+  let openTimer = 0;
   title.addEventListener("click", (event) => {
-    if (event.target !== name) {
+    const onChevron = event.target instanceof Element && Boolean(event.target.closest("i"));
+    if (onChevron || !editable) {
+      window.clearTimeout(openTimer);
       toggleCollapsed(domain);
       renderSidebar();
       return;
     }
-    window.clearTimeout(foldTimer);
-    foldTimer = window.setTimeout(() => {
-      toggleCollapsed(domain);
-      renderSidebar();
-    }, 180);
+    window.clearTimeout(openTimer);
+    openTimer = window.setTimeout(() => showDomain(domain), 180);
   });
   if (editable) {
     name.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      window.clearTimeout(foldTimer);
+      window.clearTimeout(openTimer);
       editDomain(group, domain);
     });
   }
@@ -714,29 +737,488 @@ function editDomain(group: HTMLElement, domain: string) {
   input.addEventListener("blur", () => finish(true));
 }
 
+function showDomain(domain: string) {
+  if (domain === "最近" || domain === "收藏") {
+    return;
+  }
+  if (readCollapsed().has(domain)) {
+    toggleCollapsed(domain);
+  }
+  domainView = domain;
+  configOpen = false;
+  render();
+}
+
+function openSiblingMenu(anchor: HTMLElement, system: SystemItem) {
+  let menu = document.getElementById("system-switch-menu");
+  if (!menu) {
+    menu = el("div", "pop");
+    menu.id = "system-switch-menu";
+    document.body.append(menu);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+  }
+  if (!menu.hidden && menu.dataset.system === system.id) {
+    menu.hidden = true;
+    return;
+  }
+  const domain = system.domain || "其他";
+  const members = library.systems.filter((item) => (item.domain || "其他") === domain);
+  menu.dataset.system = system.id;
+  const head = el("div", "switch-head");
+  head.append(el("strong", "", domain), el("em", "", `${members.length} 个系统`));
+  const list = el("div", "switch-list");
+  list.append(
+    ...members.map((item) => {
+      const node = button("", item.id === system.id ? "item on" : "item", () => {
+        menu!.hidden = true;
+        if (item.id !== system.id || domainView) {
+          openSystemPage(item);
+        }
+      });
+      const label = el("span", "", item.name || "未命名");
+      if (item.color) {
+        const dot = el("i");
+        dot.style.background = item.color;
+        node.append(dot);
+      }
+      node.append(label, el("em", "", String(item.apis.length)));
+      return node;
+    }),
+  );
+  menu.replaceChildren(head, list);
+  closePops(menu);
+  menu.hidden = false;
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.zIndex = "60";
+  const rect = anchor.getBoundingClientRect();
+  const margin = 8;
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  let left = rect.left;
+  if (left + width > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - width - margin);
+  }
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - margin) {
+    top = Math.max(margin, rect.top - height - 6);
+  }
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.querySelector(".on")?.scrollIntoView({ block: "nearest" });
+}
+
+function openSystemPage(system: SystemItem) {
+  const fromDomain = domainView !== "";
+  selectSystem(system.id);
+  if (fromDomain) {
+    methodFilter = "";
+    groupFilter = null;
+    creatingGroup = false;
+  }
+  resetOpenState();
+  groupsOpen = true;
+  render();
+}
+
 function systemButton(system: SystemItem): HTMLButtonElement {
-  const open = system.id === selectedId && groupsOpen && !searching();
-  const node = el("button", system.id === selectedId ? "system active" : "system");
+  ensureGroups(system);
+  const hasGroups = system.groups.length > 0;
+  const viewing = !domainView && system.id === selectedId;
+  const open = viewing && hasGroups && groupsOpen && !searching();
+  const node = el("button", viewing ? "system active" : "system");
   node.type = "button";
   node.classList.toggle("open", open);
+  node.classList.toggle("flat", !hasGroups);
   node.dataset.key = `sys:${system.id}`;
   node.classList.toggle("kb", node.dataset.key === sidebarCursor);
-  node.append(el("i"), el("span", "", system.name || "未命名"), el("em", "", String(system.apis.length)));
-  node.addEventListener("click", () => {
+  const label = el("span", "", system.name || "未命名");
+  if (system.color) {
+    label.style.color = system.color;
+  }
+  node.append(el("i"), label, el("em", "", String(system.apis.length)));
+  node.addEventListener("click", (event) => {
+    if (event.button !== 0 || event.ctrlKey) {
+      event.stopPropagation();
+      return;
+    }
+    if (domainView) {
+      openSystemPage(system);
+      return;
+    }
+    if (!hasGroups) {
+      if (system.id !== selectedId) {
+        openSystemPage(system);
+      }
+      return;
+    }
     if (!searching() && system.id === selectedId) {
       groupsOpen = !groupsOpen;
+      const refreshDetail = !groupsOpen && groupFilter !== null;
       if (!groupsOpen) {
         groupFilter = null;
         creatingGroup = false;
       }
-      render();
+      if (refreshDetail) {
+        render();
+      } else {
+        renderSidebar();
+      }
       return;
     }
-    selectSystem(system.id);
-    resetOpenState();
-    render();
+    openSystemPage(system);
+  });
+  node.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openSystemMenu(event.clientX, event.clientY, system);
   });
   return node;
+}
+
+let colorMenuTimer = 0;
+let colorMenuHot = false;
+const menuHover = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+const SYSTEM_COLORS: Array<[string, string]> = [
+  ["#ff3b30", "红色"],
+  ["#ff9500", "橙色"],
+  ["#ffcc00", "黄色"],
+  ["#34c759", "绿色"],
+  ["#007aff", "蓝色"],
+  ["#af52de", "紫色"],
+  ["#8e8e93", "灰色"],
+];
+
+function pointerElement(target: EventTarget | null): Element | null {
+  if (target instanceof Element) {
+    return target;
+  }
+  if (target instanceof Node) {
+    return target.parentElement;
+  }
+  return null;
+}
+
+function hideColorMenu() {
+  window.clearTimeout(colorMenuTimer);
+  colorMenuTimer = 0;
+  colorMenuHot = false;
+  for (const id of ["system-color-menu", "system-domain-menu"]) {
+    const menu = document.getElementById(id);
+    if (menu) {
+      menu.hidden = true;
+    }
+  }
+  document.querySelectorAll("#system-menu .has-sub.open").forEach((node) => node.classList.remove("open"));
+}
+
+function closeSiblingFlyout(keepMenuId: string, anchor: HTMLElement) {
+  for (const id of ["system-color-menu", "system-domain-menu"]) {
+    if (id === keepMenuId) {
+      continue;
+    }
+    const menu = document.getElementById(id);
+    if (menu) {
+      menu.hidden = true;
+    }
+  }
+  document.querySelectorAll("#system-menu .has-sub.open").forEach((node) => {
+    if (node !== anchor) {
+      node.classList.remove("open");
+    }
+  });
+}
+
+function scheduleHideColorMenu() {
+  window.clearTimeout(colorMenuTimer);
+  colorMenuTimer = window.setTimeout(hideColorMenu, 120);
+}
+
+function paintSystemColor(system: SystemItem) {
+  const color = system.color;
+  document.querySelectorAll<HTMLElement>(`[data-key="sys:${CSS.escape(system.id)}"] > span`).forEach((node) => {
+    node.style.color = color;
+  });
+  if (system.id !== selectedId) {
+    return;
+  }
+  const name = document.querySelector(".system-head .name") as HTMLElement | null;
+  if (name) {
+    name.style.color = color;
+  }
+}
+
+function openSystemMenu(x: number, y: number, system: SystemItem) {
+  let menu = document.querySelector("#system-menu") as HTMLElement | null;
+  if (!menu) {
+    menu = el("div", "pop");
+    menu.id = "system-menu";
+    document.body.append(menu);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    menu.addEventListener("pointerleave", (event) => {
+      if (colorMenuHot || pointerElement(event.relatedTarget)?.closest("#system-color-menu, #system-domain-menu")) {
+        return;
+      }
+      scheduleHideColorMenu();
+    });
+  }
+  hideColorMenu();
+  const renameItem = button("修改名称", "item", () => {
+    hideColorMenu();
+    menu!.hidden = true;
+    startSystemRename(system);
+  });
+  const domainItem = button("业务域", "item has-sub", () => openDomainMenu(domainItem, system));
+  const colorItem = button("标签色", "item has-sub", () => openColorMenu(colorItem, system));
+  if (menuHover) {
+    renameItem.addEventListener("pointerenter", () => hideColorMenu());
+    domainItem.addEventListener("pointerenter", () => {
+      window.clearTimeout(colorMenuTimer);
+      openDomainMenu(domainItem, system);
+    });
+    domainItem.addEventListener("pointerleave", (event) => {
+      if (colorMenuHot || pointerElement(event.relatedTarget)?.closest("#system-domain-menu, #system-menu")) {
+        return;
+      }
+      scheduleHideColorMenu();
+    });
+    colorItem.addEventListener("pointerenter", () => {
+      window.clearTimeout(colorMenuTimer);
+      openColorMenu(colorItem, system);
+    });
+    colorItem.addEventListener("pointerleave", (event) => {
+      if (colorMenuHot || pointerElement(event.relatedTarget)?.closest("#system-color-menu, #system-menu")) {
+        return;
+      }
+      scheduleHideColorMenu();
+    });
+  }
+  const createItem = button("新建分组", "item", () => {
+    hideColorMenu();
+    menu!.hidden = true;
+    if (searching()) {
+      search.value = "";
+      search.dispatchEvent(new Event("input"));
+    }
+    if (selectedId !== system.id) {
+      selectSystem(system.id);
+    }
+    groupsOpen = true;
+    openGroupCreate();
+  });
+  if (menuHover) {
+    createItem.addEventListener("pointerenter", () => hideColorMenu());
+  }
+  menu.replaceChildren(renameItem, createItem, domainItem, colorItem);
+  closePops(menu);
+  menu.hidden = false;
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.zIndex = "60";
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
+}
+
+function placeColorMenu(menu: HTMLElement, anchor: HTMLElement) {
+  menu.hidden = false;
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.zIndex = "70";
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  let left = rect.right - 6;
+  if (left + width > window.innerWidth - 8) {
+    left = Math.max(8, rect.left - width + 6);
+  }
+  let top = rect.top - 6;
+  if (top + height > window.innerHeight - 8) {
+    top = Math.max(8, window.innerHeight - height - 8);
+  }
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function openDomainMenu(anchor: HTMLElement, system: SystemItem) {
+  let menu = document.querySelector("#system-domain-menu") as HTMLElement | null;
+  if (!menu) {
+    menu = el("div", "pop");
+    menu.id = "system-domain-menu";
+    document.body.append(menu);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    menu.addEventListener("pointerenter", () => {
+      colorMenuHot = true;
+      window.clearTimeout(colorMenuTimer);
+    });
+    menu.addEventListener("pointerleave", (event) => {
+      colorMenuHot = false;
+      const next = pointerElement(event.relatedTarget);
+      if (next?.closest("#system-menu .has-sub")) {
+        return;
+      }
+      if (next?.closest("#system-menu")) {
+        hideColorMenu();
+        return;
+      }
+      scheduleHideColorMenu();
+    });
+  }
+  closeSiblingFlyout("system-domain-menu", anchor);
+  anchor.classList.add("open");
+  const current = system.domain || "其他";
+  menu.replaceChildren(
+    ...knownDomains().map((domain) =>
+      button(domain, domain === current ? "item on" : "item", () => {
+        hideColorMenu();
+        const parent = document.querySelector("#system-menu") as HTMLElement | null;
+        if (parent) {
+          parent.hidden = true;
+        }
+        if (current === domain) {
+          return;
+        }
+        system.domain = domain;
+        scheduleSave();
+        render();
+      }),
+    ),
+  );
+  placeColorMenu(menu, anchor);
+}
+
+function systemRenameHost(system: SystemItem): HTMLElement | null {
+  const nodes = [...systemList.querySelectorAll<HTMLElement>(`[data-key="sys:${CSS.escape(system.id)}"]`)];
+  return (
+    nodes.find((node) => node.closest("section")?.querySelector("button.domain span")?.textContent !== "最近") ??
+    nodes[0] ??
+    detail.querySelector<HTMLElement>(`.domain-system[data-id="${CSS.escape(system.id)}"]`) ??
+    null
+  );
+}
+
+function startSystemRename(system: SystemItem) {
+  const domain = system.domain || "其他";
+  if (searching()) {
+    search.value = "";
+    query = parseQuery("");
+  }
+  if (readCollapsed().has(domain)) {
+    toggleCollapsed(domain);
+  }
+  renderSidebar();
+  const host = systemRenameHost(system);
+  if (!host) {
+    return;
+  }
+  const inPage = host.classList.contains("domain-system");
+  const box = el("div", inPage ? "domain-system editing" : "system-rename");
+  if (!inPage) {
+    box.classList.toggle("open", host.classList.contains("open"));
+    box.classList.toggle("flat", host.classList.contains("flat"));
+  }
+  const input = el("input");
+  input.value = system.name;
+  input.spellcheck = false;
+  if (system.color) {
+    input.style.color = system.color;
+  }
+  const icon = host.querySelector("i");
+  if (icon && !inPage) {
+    box.append(icon);
+  }
+  box.append(input);
+  const count = host.querySelector("em");
+  if (count) {
+    box.append(count);
+  }
+  host.replaceWith(box);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (save: boolean) => {
+    if (done) {
+      return;
+    }
+    done = true;
+    const next = input.value.trim();
+    if (save && !next) {
+      notify("系统名不能为空");
+    } else if (save && next !== system.name) {
+      system.name = next;
+      scheduleSave();
+    }
+    render();
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+function openColorMenu(anchor: HTMLElement, system: SystemItem) {
+  let menu = document.querySelector("#system-color-menu") as HTMLElement | null;
+  if (!menu) {
+    menu = el("div", "pop");
+    menu.id = "system-color-menu";
+    document.body.append(menu);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    menu.addEventListener("pointerenter", () => {
+      colorMenuHot = true;
+      window.clearTimeout(colorMenuTimer);
+    });
+    menu.addEventListener("pointerleave", (event) => {
+      colorMenuHot = false;
+      const next = pointerElement(event.relatedTarget);
+      if (next?.closest("#system-menu .has-sub")) {
+        return;
+      }
+      if (next?.closest("#system-menu")) {
+        hideColorMenu();
+        return;
+      }
+      scheduleHideColorMenu();
+    });
+  }
+  closeSiblingFlyout("system-color-menu", anchor);
+  anchor.classList.add("open");
+  if (menu.dataset.system === system.id && !menu.hidden) {
+    placeColorMenu(menu, anchor);
+    return;
+  }
+  menu.dataset.system = system.id;
+  const apply = (color: string) => {
+    hideColorMenu();
+    const parent = document.querySelector("#system-menu") as HTMLElement | null;
+    if (parent) {
+      parent.hidden = true;
+    }
+    system.color = color;
+    scheduleSave();
+    paintSystemColor(system);
+  };
+  const reset = button("默认", system.color ? "label-color" : "label-color on", () => apply(""));
+  reset.prepend(el("i", "none"));
+  menu.replaceChildren(
+    reset,
+    ...SYSTEM_COLORS.map(([color, name]) => {
+      const node = button(name, system.color === color ? "label-color on" : "label-color", () => apply(color));
+      node.style.setProperty("--dot", color);
+      const dot = el("i");
+      dot.style.background = color;
+      node.prepend(dot);
+      return node;
+    }),
+  );
+  placeColorMenu(menu, anchor);
 }
 
 function apiHit(system: SystemItem, api: ApiItem, withSystem: boolean): HTMLButtonElement {
@@ -804,6 +1286,13 @@ function onSearchKey(event: KeyboardEvent) {
 }
 
 function renderCrumb(system: SystemItem | undefined) {
+  if (domainView) {
+    const count = library.systems.filter((item) => (item.domain || "其他") === domainView).length;
+    crumbDomain.textContent = domainView;
+    crumbName.textContent = "";
+    crumbCount.textContent = `${count} 个系统`;
+    return;
+  }
   if (!system) {
     crumbDomain.textContent = "";
     crumbName.textContent = "OpenApi";
@@ -816,7 +1305,7 @@ function renderCrumb(system: SystemItem | undefined) {
 }
 
 function setConfigOpen(open: boolean) {
-  configOpen = open && Boolean(selectedSystem());
+  configOpen = open && !domainView && Boolean(selectedSystem());
   applyConfigChrome();
 }
 
@@ -848,10 +1337,273 @@ function renderConfig(system: SystemItem | undefined) {
   applyConfigChrome();
 }
 
+function parkActions() {
+  const actions = document.querySelector(".top-actions");
+  actions?.querySelector(".system-more")?.remove();
+  document.querySelector(".top")?.append(actions as HTMLElement);
+}
+
+function applyDomainSystemOrder(domain: string, ids: string[]) {
+  const next = [...library.systems];
+  const ordered = ids
+    .map((id) => next.find((system) => system.id === id && (system.domain || "其他") === domain))
+    .filter((system): system is SystemItem => Boolean(system));
+  const slots = ordered
+    .map((system) => next.findIndex((item) => item.id === system.id))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right);
+  ordered.forEach((system, index) => {
+    if (slots[index] !== undefined) {
+      next[slots[index]] = system;
+    }
+  });
+  library.systems = next;
+}
+
+function attachSystemDrag(row: HTMLElement, domain: string) {
+  const handle = el("span", "handle", "⋮⋮");
+  handle.title = "拖动排序";
+  handle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  handle.addEventListener("mousedown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const home = row.parentElement;
+    const id = row.dataset.id ?? "";
+    if (!home || !id) {
+      return;
+    }
+    const startY = event.clientY;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let moved = false;
+    let slideFrame = 0;
+    let gap: HTMLElement | null = null;
+    let float: HTMLElement | null = null;
+    let parkedTop = 0;
+    const slide = (change: () => void) => {
+      if (reduceMotion) {
+        change();
+        return;
+      }
+      const nodes = [...home.querySelectorAll<HTMLElement>(":scope > *")];
+      const before = new Map(nodes.map((node) => [node, node.getBoundingClientRect().top]));
+      change();
+      const pending: HTMLElement[] = [];
+      for (const node of nodes) {
+        if (!node.isConnected) {
+          continue;
+        }
+        node.style.transition = "none";
+        node.style.transform = "";
+        const dy = (before.get(node) ?? 0) - node.getBoundingClientRect().top;
+        if (Math.abs(dy) < 1) {
+          continue;
+        }
+        node.style.transform = `translateY(${dy}px)`;
+        pending.push(node);
+      }
+      window.cancelAnimationFrame(slideFrame);
+      slideFrame = window.requestAnimationFrame(() => {
+        for (const node of pending) {
+          node.style.transition = "transform 200ms cubic-bezier(.2, .8, .2, 1)";
+          node.style.transform = "";
+        }
+      });
+    };
+    const placeGap = (clientY: number) => {
+      const slot = gap;
+      if (!slot) {
+        return;
+      }
+      const rows = [...home.querySelectorAll<HTMLElement>(":scope > [data-id]")];
+      let anchor: Element | null = null;
+      let after = false;
+      for (const item of rows) {
+        const rect = item.getBoundingClientRect();
+        if (clientY < rect.top) {
+          anchor = item;
+          break;
+        }
+        anchor = item;
+        after = true;
+        if (clientY < rect.bottom) {
+          after = clientY > (rect.top + rect.bottom) / 2;
+          break;
+        }
+      }
+      if (!anchor) {
+        return;
+      }
+      if (after) {
+        anchor = anchor.nextElementSibling;
+      }
+      if (anchor === slot || slot.nextElementSibling === anchor) {
+        return;
+      }
+      slide(() => home.insertBefore(slot, anchor));
+    };
+    const lift = () => {
+      const origin = row.getBoundingClientRect();
+      parkedTop = origin.top;
+      gap = el("div", "row-gap");
+      gap.style.height = `${origin.height}px`;
+      home.insertBefore(gap, row);
+      float = el("div", "drag-float");
+      float.style.left = `${origin.left}px`;
+      float.style.top = `${origin.top}px`;
+      float.style.width = `${origin.width}px`;
+      row.classList.add("dragging");
+      float.append(row);
+      document.body.append(float);
+      document.body.classList.add("row-dragging");
+    };
+    const finish = (changed: boolean) => {
+      window.cancelAnimationFrame(slideFrame);
+      for (const node of home.querySelectorAll<HTMLElement>(":scope > *")) {
+        node.style.transition = "";
+        node.style.transform = "";
+      }
+      row.classList.remove("dragging");
+      if (!changed && gap?.isConnected) {
+        gap.replaceWith(row);
+      }
+      float?.remove();
+      float = null;
+      gap = null;
+      document.body.classList.remove("row-dragging");
+      if (changed) {
+        scheduleSave();
+        render();
+      }
+    };
+    const move = (ev: MouseEvent) => {
+      if (!moved) {
+        if (Math.abs(ev.clientY - startY) <= 3) {
+          return;
+        }
+        moved = true;
+        lift();
+      }
+      if (!float) {
+        return;
+      }
+      float.style.transform = `translateY(${ev.clientY - startY}px)`;
+      placeGap(ev.clientY);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      if (moved) {
+        const swallow = (ev: Event) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          window.removeEventListener("click", swallow, true);
+        };
+        window.addEventListener("click", swallow, true);
+      }
+      if (!gap || !float) {
+        row.classList.remove("dragging");
+        document.body.classList.remove("row-dragging");
+        return;
+      }
+      const before = library.systems.map((system) => system.id).join("\0");
+      const order: string[] = [];
+      for (const child of home.children) {
+        if (child === gap) {
+          order.push(id);
+          continue;
+        }
+        if (child instanceof HTMLElement && child.dataset.id) {
+          order.push(child.dataset.id);
+        }
+      }
+      applyDomainSystemOrder(domain, order);
+      const changed = library.systems.map((system) => system.id).join("\0") !== before;
+      const slotTop = gap.getBoundingClientRect().top;
+      const current = float.getBoundingClientRect().top;
+      if (reduceMotion || Math.abs(current - slotTop) < 1) {
+        finish(changed);
+        return;
+      }
+      float.style.transition = "transform 200ms cubic-bezier(.2, .8, .2, 1)";
+      let settled = false;
+      const land = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        float?.removeEventListener("transitionend", land);
+        finish(changed);
+      };
+      const timer = window.setTimeout(land, 240);
+      float.addEventListener("transitionend", land);
+      window.requestAnimationFrame(() => {
+        if (float) {
+          float.style.transform = `translateY(${slotTop - parkedTop}px)`;
+        }
+      });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+  row.prepend(handle);
+}
+
+function renderDomainPage(domain: string): HTMLElement {
+  const members = library.systems.filter((system) => (system.domain || "其他") === domain);
+  const page = el("section", "domain-page");
+  const head = el("div", "system-head");
+  const title = el("div", "system-title");
+  title.append(el("span", "domain-name", domain), el("em", "", `${members.length} 个系统`));
+  head.append(title);
+  const list = el("div", "domain-systems");
+  if (members.length === 0) {
+    list.append(el("p", "filter-empty", "这个业务域还没有系统"));
+  }
+  for (const system of members) {
+    const row = el("button", "domain-system");
+    row.type = "button";
+    row.dataset.id = system.id;
+    const name = el("b", "", system.name || "未命名");
+    if (system.color) {
+      name.style.color = system.color;
+    }
+    row.append(name, el("em", "", `${system.apis.length} 个接口`));
+    row.addEventListener("click", () => openSystemPage(system));
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      openSystemMenu(event.clientX, event.clientY, system);
+    });
+    attachSystemDrag(row, domain);
+    list.append(row);
+  }
+  page.append(head, list);
+  return page;
+}
+
 function renderDetail() {
+  parkActions();
   const scrollTop = detail.scrollTop;
   detail.replaceChildren();
+  const top = document.querySelector(".top");
+  if (domainView) {
+    top?.classList.remove("system-open");
+    top?.classList.add("domain-open");
+    renderCrumb(undefined);
+    renderConfig(undefined);
+    detail.append(renderDomainPage(domainView));
+    detail.scrollTop = scrollTop;
+    return;
+  }
+  top?.classList.remove("domain-open");
   const system = selectedSystem();
+  top?.classList.toggle("system-open", Boolean(system));
   renderCrumb(system);
   renderConfig(system);
   if (!system) {
@@ -886,70 +1638,21 @@ function renderEmpty(): HTMLElement {
 
 function renderSystemHead(system: SystemItem): HTMLElement {
   const head = el("div", "system-head");
-
-  const name = el("input", "name");
-  name.value = system.name;
-  name.placeholder = "系统名";
-  let lastName = system.name;
-  name.addEventListener("input", () => {
-    const next = name.value.trim();
-    if (!next) {
-      return;
-    }
-    system.name = next;
-    lastName = next;
-    scheduleSave();
+  const title = el("div", "system-title");
+  const domainName = el("span", "domain-name jump", system.domain || "其他");
+  domainName.addEventListener("click", () => showDomain(system.domain || "其他"));
+  const name = el("span", "name", system.name || "未命名");
+  if (system.color) {
+    name.style.color = system.color;
+  }
+  name.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openSiblingMenu(name, system);
   });
-  name.addEventListener("blur", () => {
-    if (!name.value.trim()) {
-      name.value = lastName;
-      system.name = lastName;
-      notify("系统名不能为空");
-    }
-    renderSidebar();
-    renderCrumb(system);
-  });
-  name.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === "Escape") {
-      event.preventDefault();
-      name.blur();
-    }
-  });
-
-  const custom = el("input", "custom-domain");
-  custom.placeholder = "业务域";
-  const isCustom = !DOMAIN_ORDER.includes(system.domain || "其他");
-  custom.value = isCustom ? system.domain : "";
-  custom.hidden = !isCustom;
-  const select = menuField(
-    [...DOMAIN_ORDER.map((domain) => ({ value: domain, label: domain })), { value: "__custom__", label: "自定义" }],
-    isCustom ? "__custom__" : system.domain || "其他",
-    (value) => {
-      if (value === "__custom__") {
-        custom.hidden = false;
-        custom.focus();
-        return;
-      }
-      custom.hidden = true;
-      system.domain = value;
-      scheduleSave();
-      renderSidebar();
-      renderCrumb(system);
-    },
-  );
-  custom.addEventListener("input", () => {
-    system.domain = custom.value.trim();
-    scheduleSave();
-  });
-  custom.addEventListener("blur", () => {
-    if (!system.domain) {
-      system.domain = "其他";
-      select.setValue("其他");
-      custom.hidden = true;
-      scheduleSave();
-    }
-    renderSidebar();
-    renderCrumb(system);
+  name.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openSystemMenu(event.clientX, event.clientY, system);
   });
 
   const moreWrap = el("div", "pop-wrap");
@@ -982,7 +1685,16 @@ function renderSystemHead(system: SystemItem): HTMLElement {
   }, "更多");
   moreWrap.append(more, pop);
 
-  head.append(name, select, custom, moreWrap);
+  const count = el("em", "", `${system.apis.length} 个接口`);
+  title.append(domainName, el("span", "slash", "/"), name, count);
+  const actions = document.querySelector(".top-actions");
+  if (actions) {
+    moreWrap.classList.add("system-more");
+    actions.append(moreWrap);
+    head.append(title, actions);
+  } else {
+    head.append(title, moreWrap);
+  }
   return head;
 }
 
@@ -1056,7 +1768,6 @@ function renderLinkCard(system: SystemItem, kind: "env" | "doc"): HTMLElement {
 function renderLinkRow(system: SystemItem, link: LinkItem, kind: "env" | "doc"): HTMLElement {
   const row = el("div", "row-item");
   row.dataset.row = link.id;
-  row.draggable = true;
   row.append(el("span", "handle", "⋮⋮"));
   row.append(el("b", "", link.label || "未命名"));
   if (kind === "env") {
@@ -1065,7 +1776,7 @@ function renderLinkRow(system: SystemItem, link: LinkItem, kind: "env" | "doc"):
     row.classList.toggle("current", current);
     row.title = current ? "再点一次，只用全局变量" : "选择这个环境";
     row.addEventListener("click", (event) => {
-      if ((event.target as HTMLElement).closest("button, input, a")) {
+      if ((event.target as HTMLElement).closest("button, input, a, .handle")) {
         return;
       }
       setCurrentEnv(system, current ? "" : link.id);
@@ -1216,35 +1927,222 @@ function focusFirstInput(rowKey: string) {
 }
 
 function attachDrag<T extends { id: string }>(row: HTMLElement, id: string, read: () => T[], write: (next: T[]) => void) {
-  row.addEventListener("dragstart", (event) => {
-    event.dataTransfer?.setData("text/plain", id);
-    row.classList.add("dragging");
-  });
-  row.addEventListener("dragend", () => row.classList.remove("dragging"));
-  row.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    row.classList.add("drop-target");
-  });
-  row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
-  row.addEventListener("drop", (event) => {
-    event.preventDefault();
-    row.classList.remove("drop-target");
-    const sourceId = event.dataTransfer?.getData("text/plain");
-    if (!sourceId || sourceId === id) {
+  const handle = row.querySelector(".handle");
+  if (!(handle instanceof HTMLElement) || row.dataset.row !== id) {
+    return;
+  }
+  handle.title = "拖动排序";
+  handle.addEventListener("mousedown", (event) => {
+    if (event.button !== 0) {
       return;
     }
-    const list = read();
-    const from = list.findIndex((item) => item.id === sourceId);
-    const to = list.findIndex((item) => item.id === id);
-    if (from === -1 || to === -1) {
+    event.preventDefault();
+    event.stopPropagation();
+    const home = row.parentElement;
+    if (!home) {
       return;
     }
-    const next = [...list];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    write(next);
-    scheduleSave();
-    renderDetail();
+    const rows = () => [...home.querySelectorAll<HTMLElement>(":scope > .row-item")].filter((item) => item.querySelector(".handle"));
+    const startY = event.clientY;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let moved = false;
+    let slideFrame = 0;
+    let gap: HTMLElement | null = null;
+    const slide = (change: () => void) => {
+      if (reduceMotion || !gap) {
+        change();
+        return;
+      }
+      const nodes = [...home.querySelectorAll<HTMLElement>(":scope > .row-item, :scope > .row-gap")];
+      const before = new Map(nodes.map((node) => [node, node.getBoundingClientRect().top]));
+      change();
+      const pending: HTMLElement[] = [];
+      for (const node of nodes) {
+        if (!node.isConnected) {
+          continue;
+        }
+        node.style.transition = "none";
+        node.style.transform = "";
+        const dy = (before.get(node) ?? 0) - node.getBoundingClientRect().top;
+        if (Math.abs(dy) < 1) {
+          continue;
+        }
+        node.style.transform = `translateY(${dy}px)`;
+        pending.push(node);
+      }
+      window.cancelAnimationFrame(slideFrame);
+      slideFrame = window.requestAnimationFrame(() => {
+        for (const node of pending) {
+          node.style.transition = "transform 200ms cubic-bezier(.2, .8, .2, 1)";
+          node.style.transform = "";
+        }
+      });
+    };
+    const placeGap = (clientY: number) => {
+      const slot = gap;
+      if (!slot) {
+        return;
+      }
+      const others = rows();
+      if (others.length === 0) {
+        return;
+      }
+      let anchor: Element | null = null;
+      for (const item of others) {
+        const rect = item.getBoundingClientRect();
+        if (clientY < rect.top + rect.height / 2) {
+          anchor = item;
+          break;
+        }
+      }
+      if (!anchor) {
+        const last = others[others.length - 1];
+        anchor = last.nextElementSibling === slot ? slot.nextElementSibling : last.nextElementSibling;
+      }
+      if (anchor === slot || slot.nextElementSibling === anchor) {
+        return;
+      }
+      slide(() => home.insertBefore(slot, anchor));
+    };
+    const lift = () => {
+      const origin = row.getBoundingClientRect();
+      gap = el("div", "row-gap");
+      gap.style.height = `${origin.height}px`;
+      home.insertBefore(gap, row);
+      document.body.append(row);
+      row.classList.add("dragging");
+      row.style.position = "fixed";
+      row.style.left = `${origin.left}px`;
+      row.style.top = `${origin.top}px`;
+      row.style.width = `${origin.width}px`;
+      row.style.height = `${origin.height}px`;
+      row.style.margin = "0";
+      row.style.zIndex = "50";
+      document.body.classList.add("row-dragging");
+    };
+    const move = (ev: MouseEvent) => {
+      if (!moved) {
+        if (Math.abs(ev.clientY - startY) <= 3) {
+          return;
+        }
+        moved = true;
+        lift();
+      }
+      if (!gap) {
+        return;
+      }
+      row.style.transform = `translateY(${ev.clientY - startY}px)`;
+      placeGap(ev.clientY);
+    };
+    const persist = (order: string[]) => {
+      const list = read();
+      const before = list.map((item) => item.id).join("\0");
+      const byId = new Map(list.map((item) => [item.id, item]));
+      const queue: T[] = [];
+      for (const itemId of order) {
+        const item = byId.get(itemId);
+        if (item) {
+          queue.push(item);
+        }
+      }
+      const moving = new Set(queue.map((item) => item.id));
+      let index = 0;
+      const next = list.map((item) => (moving.has(item.id) ? queue[index++] ?? item : item));
+      if (next.map((item) => item.id).join("\0") === before) {
+        return;
+      }
+      write(next);
+      scheduleSave();
+    };
+    const orderNow = () => {
+      if (!gap) {
+        return rows().map((item) => item.dataset.row || "").filter(Boolean);
+      }
+      const order: string[] = [];
+      for (const child of home.children) {
+        if (child === gap) {
+          if (row.dataset.row) {
+            order.push(row.dataset.row);
+          }
+          continue;
+        }
+        if (child instanceof HTMLElement && child.classList.contains("row-item") && child.querySelector(".handle") && child.dataset.row) {
+          order.push(child.dataset.row);
+        }
+      }
+      return order;
+    };
+    const clearLift = () => {
+      row.classList.remove("dragging");
+      row.style.position = "";
+      row.style.left = "";
+      row.style.top = "";
+      row.style.width = "";
+      row.style.height = "";
+      row.style.margin = "";
+      row.style.zIndex = "";
+      row.style.transform = "";
+      row.style.transition = "";
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      window.cancelAnimationFrame(slideFrame);
+      document.body.classList.remove("row-dragging");
+      if (moved) {
+        const swallow = (ev: Event) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          window.removeEventListener("click", swallow, true);
+        };
+        window.addEventListener("click", swallow, true);
+      }
+      if (!gap) {
+        return;
+      }
+      for (const node of home.querySelectorAll<HTMLElement>(":scope > .row-item, :scope > .row-gap")) {
+        node.style.transition = "";
+        node.style.transform = "";
+      }
+      const order = orderNow();
+      const slot = gap.getBoundingClientRect().top;
+      const originTop = Number.parseFloat(row.style.top);
+      const current = row.getBoundingClientRect().top;
+      persist(order);
+      const land = () => {
+        const slotNode = gap;
+        gap = null;
+        if (slotNode?.isConnected) {
+          slotNode.replaceWith(row);
+          clearLift();
+          return;
+        }
+        clearLift();
+        row.remove();
+      };
+      if (reduceMotion || Math.abs(current - slot) < 1) {
+        land();
+        return;
+      }
+      row.style.transition = "transform 200ms cubic-bezier(.2, .8, .2, 1)";
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        row.removeEventListener("transitionend", finish);
+        land();
+      };
+      const timer = window.setTimeout(finish, 240);
+      row.addEventListener("transitionend", finish);
+      window.requestAnimationFrame(() => {
+        row.style.transform = `translateY(${slot - originTop}px)`;
+      });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
   });
 }
 
@@ -1338,7 +2236,6 @@ function renderVariableScope(system: SystemItem, envId: string, label: string): 
 function renderVariableRow(system: SystemItem, variable: VariableItem): HTMLElement {
   const row = el("div", "row-item");
   row.dataset.row = variable.id;
-  row.draggable = true;
   row.append(el("span", "handle", "⋮⋮"));
   row.append(el("b", "", `{{${variable.name}}}`));
   const shown = variable.secret && !revealed.has(variable.id) ? "••••••••" : variable.value;
@@ -1716,67 +2613,208 @@ function attachGroupDrag(row: HTMLElement, system: SystemItem, name: string) {
     if (!home) {
       return;
     }
+    const stops = (node: Element) =>
+      node.classList.contains("api-group") || node.classList.contains("group-nav") || node.classList.contains("nav-add");
     const block = () => {
       const nodes = [row];
       let next = row.nextElementSibling;
-      while (next && !next.classList.contains("api-group") && !next.classList.contains("group-nav") && !next.classList.contains("nav-add")) {
+      while (next && !stops(next)) {
         nodes.push(next as HTMLElement);
         next = next.nextElementSibling;
       }
       return nodes;
     };
-    const rows = () => [...home.querySelectorAll<HTMLElement>(":scope > [data-group]")];
-    row.classList.add("dragging");
-    document.body.classList.add("group-dragging");
-    const move = (ev: MouseEvent) => {
-      let hit: HTMLElement | null = null;
-      let after = false;
-      for (const item of rows()) {
-        if (item === row) {
+    const startY = event.clientY;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let moved = false;
+    let slideFrame = 0;
+    let gap: HTMLElement | null = null;
+    let float: HTMLElement | null = null;
+    let tail: HTMLElement[] = [];
+    let parkedTop = 0;
+    let gapInset = 0;
+    const slide = (change: () => void) => {
+      if (reduceMotion) {
+        change();
+        return;
+      }
+      const nodes = [...home.querySelectorAll<HTMLElement>(":scope > *")];
+      const before = new Map(nodes.map((node) => [node, node.getBoundingClientRect().top]));
+      change();
+      const pending: HTMLElement[] = [];
+      for (const node of nodes) {
+        if (!node.isConnected) {
           continue;
         }
+        node.style.transition = "none";
+        node.style.transform = "";
+        const dy = (before.get(node) ?? 0) - node.getBoundingClientRect().top;
+        if (Math.abs(dy) < 1) {
+          continue;
+        }
+        node.style.transform = `translateY(${dy}px)`;
+        pending.push(node);
+      }
+      window.cancelAnimationFrame(slideFrame);
+      slideFrame = window.requestAnimationFrame(() => {
+        for (const node of pending) {
+          node.style.transition = "transform 200ms cubic-bezier(.2, .8, .2, 1)";
+          node.style.transform = "";
+        }
+      });
+    };
+    const blockEnd = (item: HTMLElement) => {
+      let cursor = item.nextElementSibling;
+      while (cursor && cursor !== gap && !stops(cursor)) {
+        cursor = cursor.nextElementSibling;
+      }
+      return cursor;
+    };
+    const placeGap = (clientY: number) => {
+      const slot = gap;
+      if (!slot) {
+        return;
+      }
+      const groups = [...home.querySelectorAll<HTMLElement>(":scope > [data-group]")];
+      let anchor: Element | null = null;
+      let after = false;
+      for (const item of groups) {
         const top = item.getBoundingClientRect().top;
-        let cursor = item.nextElementSibling;
-        while (cursor && !cursor.classList.contains("api-group") && !cursor.classList.contains("group-nav") && !cursor.classList.contains("nav-add")) {
-          cursor = cursor.nextElementSibling;
+        const end = blockEnd(item);
+        const bottom = end?.getBoundingClientRect().top ?? home.getBoundingClientRect().bottom;
+        if (clientY < top || clientY >= bottom) {
+          continue;
         }
-        const bottom = cursor?.getBoundingClientRect().top ?? home.getBoundingClientRect().bottom;
-        if (ev.clientY >= top && ev.clientY < bottom) {
-          hit = item;
-          after = ev.clientY > (top + bottom) / 2;
-          break;
-        }
+        anchor = item;
+        after = clientY > (top + bottom) / 2;
+        break;
       }
-      if (!hit) {
+      if (!anchor) {
         return;
       }
-      let anchor: Element | null = hit;
       if (after) {
-        anchor = hit.nextElementSibling;
-        while (anchor && !anchor.classList.contains("api-group") && !anchor.classList.contains("group-nav") && !anchor.classList.contains("nav-add")) {
-          anchor = anchor.nextElementSibling;
-        }
+        anchor = blockEnd(anchor as HTMLElement);
       }
-      const nodes = block();
-      if (anchor && nodes.includes(anchor as HTMLElement)) {
+      const last = tail.length > 0 ? tail[tail.length - 1] : slot;
+      if (anchor === slot || last.nextElementSibling === anchor) {
         return;
       }
-      for (const node of nodes) {
-        home.insertBefore(node, anchor);
+      slide(() => {
+        home.insertBefore(slot, anchor);
+        let cursor: Element = slot;
+        for (const child of tail) {
+          cursor.after(child);
+          cursor = child;
+        }
+      });
+    };
+    const lift = () => {
+      const nodes = block();
+      tail = nodes.slice(1);
+      const origin = row.getBoundingClientRect();
+      const prevBottom = row.previousElementSibling?.getBoundingClientRect().bottom ?? origin.top;
+      const nextTop = row.nextElementSibling?.getBoundingClientRect().top ?? origin.bottom;
+      const spaceTop = Math.min(prevBottom, origin.top);
+      parkedTop = origin.top;
+      gapInset = origin.top - spaceTop;
+      gap = el("div", "row-gap");
+      gap.style.height = `${Math.max(origin.height, nextTop - spaceTop)}px`;
+      home.insertBefore(gap, row);
+      float = el("div", "drag-float");
+      float.style.left = `${origin.left}px`;
+      float.style.top = `${origin.top}px`;
+      float.style.width = `${origin.width}px`;
+      row.classList.add("dragging");
+      float.append(row);
+      document.body.append(float);
+      document.body.classList.add("group-dragging");
+    };
+    const finish = (changed: boolean) => {
+      window.cancelAnimationFrame(slideFrame);
+      for (const node of home.querySelectorAll<HTMLElement>(":scope > *")) {
+        node.style.transition = "";
+        node.style.transform = "";
       }
+      row.classList.remove("dragging");
+      if (!changed && gap?.isConnected) {
+        gap.replaceWith(row);
+      }
+      float?.remove();
+      float = null;
+      gap = null;
+      document.body.classList.remove("group-dragging");
+      if (changed) {
+        scheduleSave();
+        render();
+      }
+    };
+    const move = (ev: MouseEvent) => {
+      if (!moved) {
+        if (Math.abs(ev.clientY - startY) <= 3) {
+          return;
+        }
+        moved = true;
+        lift();
+      }
+      if (!float) {
+        return;
+      }
+      float.style.transform = `translateY(${ev.clientY - startY}px)`;
+      placeGap(ev.clientY);
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
-      document.body.classList.remove("group-dragging");
-      const before = system.groups.join("\0");
-      applyGroupOrder(system, rows().map((item) => item.dataset.group || "").filter(Boolean));
-      if (system.groups.join("\0") === before) {
+      if (moved) {
+        const swallow = (ev: Event) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          window.removeEventListener("click", swallow, true);
+        };
+        window.addEventListener("click", swallow, true);
+      }
+      if (!gap || !float) {
         row.classList.remove("dragging");
+        document.body.classList.remove("group-dragging");
         return;
       }
-      scheduleSave();
-      render();
+      const before = system.groups.join("\0");
+      const order: string[] = [];
+      for (const child of home.children) {
+        if (child === gap) {
+          order.push(name);
+          continue;
+        }
+        if (child instanceof HTMLElement && child.dataset.group) {
+          order.push(child.dataset.group);
+        }
+      }
+      applyGroupOrder(system, order);
+      const changed = system.groups.join("\0") !== before;
+      const slotTop = gap.getBoundingClientRect().top + gapInset;
+      const current = float.getBoundingClientRect().top;
+      if (reduceMotion || Math.abs(current - slotTop) < 1) {
+        finish(changed);
+        return;
+      }
+      float.style.transition = "transform 200ms cubic-bezier(.2, .8, .2, 1)";
+      let settled = false;
+      const land = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        float?.removeEventListener("transitionend", land);
+        finish(changed);
+      };
+      const timer = window.setTimeout(land, 240);
+      float.addEventListener("transitionend", land);
+      window.requestAnimationFrame(() => {
+        if (float) {
+          float.style.transform = `translateY(${slotTop - parkedTop}px)`;
+        }
+      });
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
@@ -1821,9 +2859,6 @@ function systemGroupNav(system: SystemItem): HTMLElement {
   const loose = system.apis.filter((api) => !groupName(api)).length;
   if (system.groups.length > 0 && loose > 0) {
     list.append(groupNavItem("", "未分组", loose, system));
-  }
-  if (!creatingGroup) {
-    list.append(button("新建分组", "nav-add", () => openGroupCreate()));
   }
   if (focusGroupCreate) {
     focusGroupCreate = false;
@@ -2085,21 +3120,23 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
   }, api.starred ? "取消收藏" : "收藏");
   const badge = el("span", `method method-${api.method.toLowerCase()}`, api.method);
   const path = el("code", "path", api.path);
+  path.title = api.path;
   const count = el("em", "", `${api.cases.length} 条用例`);
-  row.append(
-    star,
-    badge,
-    path,
+  const main = el("div", "api-main");
+  main.append(star, badge, path);
+  const actions = el("div", "api-actions");
+  actions.append(
     button("复制", "mini", () => {
       void copyText(api.path).then(() => notify("已复制路径"));
     }),
     button("编辑", "mini", () => openPathDialog(system, api)),
     count,
   );
+  row.append(main, actions);
 
   const target = mergeCandidate(system, api);
   if (target) {
-    row.append(
+    actions.append(
       button("可合并", "ghost warn", () => {
         void confirmAction(`把这条接口的 ${api.cases.length} 条用例并入 ${target.method} ${target.path}？`, "合并接口").then((ok) => {
           if (!ok) {
@@ -2119,7 +3156,7 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
       }, `与 ${target.method} ${target.path} 只差大小写或末尾斜杠`),
     );
   }
-  row.append(
+  actions.append(
     button("复制全部", "ghost", () => {
       const text = api.cases.map((item) => substitute(item.content, variablesFor(system)).trim()).filter(Boolean).join("\n\n");
       void copyText(text).then(() => notify(`已复制 ${api.cases.length} 条用例`));
@@ -3243,6 +4280,13 @@ function closePops(except?: HTMLElement) {
       pop.hidden = true;
     }
   });
+  if (except?.id === "system-color-menu" || except?.id === "system-domain-menu") {
+    return;
+  }
+  colorMenuHot = false;
+  if (except?.id !== "system-menu") {
+    document.querySelectorAll("#system-menu .has-sub.open").forEach((node) => node.classList.remove("open"));
+  }
 }
 
 function openPop(anchor: HTMLElement, pop: HTMLElement) {
@@ -3304,6 +4348,24 @@ function currentSize(): number {
   return clampSize(Number(sizeInput.value));
 }
 
+function applySystemNameBg(color: string | null) {
+  const root = document.documentElement;
+  const input = document.querySelector("#system-name-bg") as HTMLInputElement;
+  if (!color) {
+    root.style.removeProperty("--system-name-bg");
+    root.style.removeProperty("--system-name-fg");
+    root.classList.remove("system-name-bg");
+    localStorage.removeItem("system-name-bg");
+    input.value = "#f4f1ea";
+    return;
+  }
+  root.style.setProperty("--system-name-bg", color);
+  root.style.setProperty("--system-name-fg", isLightColor(color) ? "#1e1c19" : "#eef0ec");
+  root.classList.add("system-name-bg");
+  input.value = color;
+  localStorage.setItem("system-name-bg", color);
+}
+
 function applyTheme(theme: Theme) {
   const effective = theme === "system" ? (systemDark.matches ? "dark" : "light") : theme;
   document.documentElement.dataset.theme = effective;
@@ -3329,6 +4391,12 @@ function initAppearance() {
     node.addEventListener("click", () => applyTheme((node.dataset.theme as Theme) ?? "system"));
   });
 
+  applySystemNameBg(localStorage.getItem("system-name-bg"));
+  document.querySelector("#system-name-bg")?.addEventListener("input", (event) => {
+    applySystemNameBg((event.currentTarget as HTMLInputElement).value);
+  });
+  document.querySelector("#system-name-bg-reset")?.addEventListener("click", () => applySystemNameBg(null));
+
   applyCurlStyle(localStorage.getItem("curl-bg") || DEFAULT_CURL_BG, clampSize(Number(localStorage.getItem("curl-font-size") ?? DEFAULT_FONT_SIZE)));
   colorInput.addEventListener("input", () => applyCurlStyle(colorInput.value, currentSize()));
   sizeInput.addEventListener("change", () => applyCurlStyle(colorInput.value, currentSize()));
@@ -3337,10 +4405,33 @@ function initAppearance() {
   document.querySelector("#curl-size-up")?.addEventListener("click", () => applyCurlStyle(colorInput.value, clampSize(currentSize() + 1)));
 
   const settings = document.querySelector("#settings") as HTMLElement;
+  const placeSettings = () => {
+    const toggle = document.querySelector("#settings-toggle") as HTMLElement;
+    document.body.append(settings);
+    settings.hidden = false;
+    settings.style.position = "fixed";
+    settings.style.right = "auto";
+    settings.style.zIndex = "80";
+    const rect = toggle.getBoundingClientRect();
+    const margin = 8;
+    const width = settings.offsetWidth;
+    const height = settings.offsetHeight;
+    const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+    let top = rect.bottom + 8;
+    if (top + height > window.innerHeight - margin) {
+      top = Math.max(margin, rect.top - height - 8);
+    }
+    settings.style.left = `${left}px`;
+    settings.style.top = `${top}px`;
+  };
   document.querySelector("#settings-toggle")?.addEventListener("click", (event) => {
     event.stopPropagation();
+    const opening = settings.hidden;
     closePops(settings);
-    settings.hidden = !settings.hidden;
+    settings.hidden = true;
+    if (opening) {
+      placeSettings();
+    }
   });
   settings.addEventListener("click", (event) => event.stopPropagation());
   document.querySelector("#ask-ok")?.addEventListener("click", () => finishAsk(true));
@@ -3363,8 +4454,32 @@ function initAppearance() {
       finishAsk(true);
     }
   });
+  let blockClick = false;
+  document.addEventListener("mousedown", (event) => {
+    if (event.button === 0 && !event.ctrlKey) {
+      blockClick = false;
+    }
+  }, true);
+  document.addEventListener("mouseup", (event) => {
+    if (event.button !== 0 || event.ctrlKey) {
+      blockClick = true;
+    }
+  }, true);
+  document.addEventListener("click", (event) => {
+    if (!blockClick) {
+      return;
+    }
+    blockClick = false;
+    const target = event.target;
+    if (target instanceof Element && target.closest(".pop")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
   document.addEventListener("click", () => closePops());
   detail.addEventListener("scroll", () => closePops(), { passive: true });
+  systemList.addEventListener("scroll", () => closePops(), { passive: true });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closePops();
@@ -3660,6 +4775,7 @@ function init() {
     .then((loaded) => {
       library = loaded;
       for (const system of library.systems) {
+        system.color = system.color || "";
         ensureGroups(system);
       }
       const saved = localStorage.getItem("selected-system-id") ?? "";

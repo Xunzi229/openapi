@@ -38,6 +38,8 @@ pub struct System {
     #[serde(default)]
     pub groups: Vec<String>,
     #[serde(default)]
+    pub color: String,
+    #[serde(default)]
     pub links: Vec<Link>,
     #[serde(default)]
     pub variables: Vec<Variable>,

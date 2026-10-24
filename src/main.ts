@@ -3499,8 +3499,12 @@ function initNavResize() {
     return Math.round(Math.min(max, Math.max(180, width)));
   };
   const saved = Number(localStorage.getItem("nav-width"));
-  if (Number.isFinite(saved) && saved > 0) {
-    app.style.setProperty("--nav-width", `${clamp(saved)}px`);
+  const width = saved === 248 ? 300 : saved;
+  if (Number.isFinite(width) && width > 0) {
+    app.style.setProperty("--nav-width", `${clamp(width)}px`);
+    if (width !== saved) {
+      localStorage.setItem("nav-width", String(width));
+    }
   }
   handle.addEventListener("mousedown", (event) => {
     if (event.button !== 0 || app.classList.contains("nav-hidden")) {

@@ -937,10 +937,14 @@ function scheduleHideColorMenu() {
 
 function paintSystemColor(system: SystemItem) {
   const color = system.color;
-  document.querySelectorAll<HTMLElement>(`[data-key="sys:${CSS.escape(system.id)}"] > span`).forEach((node) => {
+  const key = CSS.escape(system.id);
+  document.querySelectorAll<HTMLElement>(`[data-key="sys:${key}"] > span`).forEach((node) => {
     node.style.color = color;
   });
-  if (system.id !== selectedId) {
+  document.querySelectorAll<HTMLElement>(`.domain-system[data-id="${key}"] > b`).forEach((node) => {
+    node.style.color = color;
+  });
+  if (system.id !== selectedId || domainView) {
     return;
   }
   const name = document.querySelector(".system-head .name") as HTMLElement | null;
@@ -1027,17 +1031,32 @@ function placeColorMenu(menu: HTMLElement, anchor: HTMLElement) {
   menu.style.position = "fixed";
   menu.style.right = "auto";
   menu.style.zIndex = "70";
-  const rect = anchor.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  const parent = document.getElementById("system-menu");
+  const parentRect = parent && !parent.hidden ? parent.getBoundingClientRect() : anchorRect;
+  const margin = 8;
   const width = menu.offsetWidth;
   const height = menu.offsetHeight;
-  let left = rect.right - 6;
-  if (left + width > window.innerWidth - 8) {
-    left = Math.max(8, rect.left - width + 6);
+  let left = parentRect.right - 6;
+  if (left + width > window.innerWidth - margin) {
+    left = parentRect.left - width + 6;
   }
-  let top = rect.top - 6;
-  if (top + height > window.innerHeight - 8) {
-    top = Math.max(8, window.innerHeight - height - 8);
+  left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+  let top = anchorRect.top - 4;
+  if (top + height > window.innerHeight - margin) {
+    top = Math.max(margin, window.innerHeight - height - margin);
   }
+  const coversParent =
+    left < parentRect.right - 8 &&
+    left + width > parentRect.left + 8 &&
+    top < parentRect.bottom &&
+    top + height > anchorRect.bottom;
+  if (coversParent) {
+    const roomRight = window.innerWidth - margin - parentRect.right;
+    const roomLeft = parentRect.left - margin;
+    left = roomRight >= roomLeft ? parentRect.right - 6 : Math.max(margin, parentRect.left - width + 6);
+  }
+  left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
 }

@@ -1164,6 +1164,18 @@ button.domain em {
   width: max-content;
 }
 
+#system-domain-menu {
+  max-width: 220px;
+  max-height: min(280px, calc(100vh - 16px));
+  overflow: auto;
+}
+
+#system-domain-menu .item {
+  width: auto;
+  min-width: 100%;
+  white-space: nowrap;
+}
+
 #system-domain-menu .item.on {
   color: var(--accent);
 }

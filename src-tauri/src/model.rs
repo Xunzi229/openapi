@@ -150,3 +150,37 @@ impl Case {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewLog {
+    pub category: String,
+    pub action: String,
+    #[serde(default)]
+    pub system_id: String,
+    #[serde(default)]
+    pub system_name: String,
+    #[serde(default)]
+    pub api_id: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub result: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogEntry {
+    pub id: i64,
+    pub at: i64,
+    pub category: String,
+    pub action: String,
+    pub system_id: String,
+    pub system_name: String,
+    pub api_id: String,
+    pub target: String,
+    pub detail: String,
+    pub result: String,
+}

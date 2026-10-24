@@ -1,5 +1,5 @@
 use crate::import;
-use crate::model::{ApiEntry, Case, Library, Link, System, Variable};
+use crate::model::{now_millis, ApiEntry, Case, Library, Link, LogEntry, NewLog, System, Variable};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS cases (
     updated_at INTEGER NOT NULL DEFAULT 0,
     position INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    action TEXT NOT NULL,
+    system_id TEXT NOT NULL DEFAULT '',
+    system_name TEXT NOT NULL DEFAULT '',
+    api_id TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_logs_at ON logs(at DESC);
 CREATE INDEX IF NOT EXISTS idx_links_system ON links(system_id, position);
 CREATE INDEX IF NOT EXISTS idx_variables_system ON variables(system_id, position);
 CREATE INDEX IF NOT EXISTS idx_apis_system ON apis(system_id, position);
@@ -413,6 +426,105 @@ pub fn backup_to(app: &AppHandle, target: &Path) -> Result<(), String> {
     std::fs::write(target, text).map_err(|error| error.to_string())
 }
 
+const LOG_RESULT_LIMIT: usize = 20_000;
+const LOG_KEEP: i64 = 5000;
+
+fn clip_text(text: &str) -> String {
+    if text.len() <= LOG_RESULT_LIMIT {
+        return text.to_string();
+    }
+    let mut end = LOG_RESULT_LIMIT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…已截断", &text[..end])
+}
+
+fn like_pattern(keyword: &str) -> String {
+    let escaped = keyword.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+pub fn append_log(conn: &Connection, entry: &NewLog) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO logs (at, category, action, system_id, system_name, api_id, target, detail, result)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            now_millis(),
+            entry.category.trim(),
+            entry.action.trim(),
+            entry.system_id,
+            entry.system_name,
+            entry.api_id,
+            entry.target,
+            clip_text(&entry.detail),
+            clip_text(&entry.result),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.execute(
+        "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?1)",
+        params![LOG_KEEP],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub fn query_logs(conn: &Connection, category: &str, keyword: &str) -> Result<Vec<LogEntry>, String> {
+    let category = category.trim();
+    let keyword = keyword.trim();
+    let mut sql = String::from(
+        "SELECT id, at, category, action, system_id, system_name, api_id, target, detail, result FROM logs WHERE 1 = 1",
+    );
+    let mut values: Vec<String> = Vec::new();
+    if !category.is_empty() {
+        sql.push_str(" AND category = ?");
+        values.push(category.to_string());
+    }
+    if !keyword.is_empty() {
+        sql.push_str(
+            " AND (action LIKE ? ESCAPE '\\' OR system_name LIKE ? ESCAPE '\\' OR target LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' OR result LIKE ? ESCAPE '\\')",
+        );
+        let pattern = like_pattern(keyword);
+        for _ in 0..5 {
+            values.push(pattern.clone());
+        }
+    }
+    sql.push_str(" ORDER BY id DESC LIMIT 200");
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok(LogEntry {
+                id: row.get(0)?,
+                at: row.get(1)?,
+                category: row.get(2)?,
+                action: row.get(3)?,
+                system_id: row.get(4)?,
+                system_name: row.get(5)?,
+                api_id: row.get(6)?,
+                target: row.get(7)?,
+                detail: row.get(8)?,
+                result: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+}
+
+pub fn add_log(app: &AppHandle, entry: &NewLog) -> Result<(), String> {
+    let _guard = GUARD.lock().map_err(|error| error.to_string())?;
+    let dir = data_dir(app)?;
+    let conn = connect(&dir.join("library.db"))?;
+    append_log(&conn, entry)
+}
+
+pub fn list_logs(app: &AppHandle, category: &str, keyword: &str) -> Result<Vec<LogEntry>, String> {
+    let _guard = GUARD.lock().map_err(|error| error.to_string())?;
+    let dir = data_dir(app)?;
+    let conn = connect(&dir.join("library.db"))?;
+    query_logs(&conn, category, keyword)
+}
+
 pub fn restore_from(app: &AppHandle, source: &Path) -> Result<Library, String> {
     let _guard = GUARD.lock().map_err(|error| error.to_string())?;
     let text = std::fs::read_to_string(source).map_err(|error| error.to_string())?;
@@ -428,6 +540,7 @@ pub fn restore_from(app: &AppHandle, source: &Path) -> Result<Library, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::NewLog;
 
     fn sample() -> Library {
         Library {
@@ -552,6 +665,34 @@ mod tests {
         write_backup(&dir, &sample()).unwrap();
         let count = std::fs::read_dir(backup_dir(&dir)).unwrap().count();
         assert_eq!(count, BACKUP_KEEP);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn logs_survive_library_rewrite() {
+        let dir = std::env::temp_dir().join(format!("openapi-logs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = connect(&dir.join("library.db")).unwrap();
+        append_log(
+            &conn,
+            &NewLog {
+                category: "run".to_string(),
+                action: "执行用例".to_string(),
+                system_id: "s1".to_string(),
+                system_name: "svc".to_string(),
+                api_id: "a1".to_string(),
+                target: "GET /a".to_string(),
+                detail: "成功".to_string(),
+                result: "ok".to_string(),
+            },
+        )
+        .unwrap();
+        write_library(&conn, &sample()).unwrap();
+        let rows = query_logs(&conn, "run", "GET /a").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result, "ok");
+        assert!(query_logs(&conn, "create", "").unwrap().is_empty());
+        drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

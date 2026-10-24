@@ -3,7 +3,18 @@ import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { Library, RunResult, SystemItem, YapiProject } from "./types";
+import type { Library, LogEntry, RunResult, SystemItem, YapiProject } from "./types";
+
+export interface NewLog {
+  category: string;
+  action: string;
+  systemId: string;
+  systemName: string;
+  apiId: string;
+  target: string;
+  detail: string;
+  result: string;
+}
 
 export function loadLibrary(): Promise<Library> {
   return invoke("load_library");
@@ -51,6 +62,14 @@ export function backupLibrary(path: string): Promise<void> {
 
 export function restoreLibrary(path: string): Promise<Library> {
   return invoke("restore_library", { path });
+}
+
+export function appendLog(entry: NewLog): Promise<void> {
+  return invoke("append_log", { entry });
+}
+
+export function queryLogs(category: string, keyword: string): Promise<LogEntry[]> {
+  return invoke("query_logs", { category, keyword });
 }
 
 export function onMenu(handler: (id: string) => void): void {

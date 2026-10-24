@@ -5,7 +5,7 @@ mod run;
 mod store;
 mod yapi;
 
-use model::{Library, System};
+use model::{Library, NewLog, System};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
@@ -77,6 +77,16 @@ fn backup_library(app: tauri::AppHandle, path: String) -> Result<(), String> {
 #[tauri::command]
 fn restore_library(app: tauri::AppHandle, path: String) -> Result<Library, String> {
     store::restore_from(&app, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+fn append_log(app: tauri::AppHandle, entry: NewLog) -> Result<(), String> {
+    store::add_log(&app, &entry)
+}
+
+#[tauri::command]
+fn query_logs(app: tauri::AppHandle, category: String, keyword: String) -> Result<Vec<model::LogEntry>, String> {
+    store::list_logs(&app, &category, &keyword)
 }
 
 fn build_menu(app: &tauri::App) -> tauri::Result<()> {
@@ -199,7 +209,9 @@ pub fn run() {
             import_yapi,
             export_system_markdown,
             backup_library,
-            restore_library
+            restore_library,
+            append_log,
+            query_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

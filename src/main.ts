@@ -8,6 +8,7 @@ import {
   finishAsk,
   importMarkdown,
   importYapi,
+  appendLog,
   loadLibrary,
   onMenu,
   openDataDir,
@@ -16,6 +17,7 @@ import {
   pickDirectory,
   pickJsonFile,
   pickSavePath,
+  queryLogs,
   restoreLibrary,
   runCommand,
   saveLibrary,
@@ -43,7 +45,7 @@ import {
   swapHost,
   type Query,
 } from "./curl";
-import type { ApiItem, CaseItem, Library, LinkItem, RunResult, SystemItem, VariableItem } from "./types";
+import type { ApiItem, CaseItem, Library, LinkItem, LogEntry, RunResult, SystemItem, VariableItem } from "./types";
 
 const DOMAIN_ORDER = ["计划", "供应链", "采购", "风控", "商品", "PMS", "实验", "算法", "集成测试", "其他"];
 const DEFAULT_CURL_BG = "#17211d";
@@ -63,6 +65,15 @@ interface RunState {
 let library: Library = { systems: [] };
 let selectedId = "";
 let domainView = "";
+let logView = false;
+let logCategory = "";
+let logKeyword = "";
+let logRows: LogEntry[] = [];
+let logOpenId = 0;
+let logLoading = false;
+let logSeq = 0;
+let logTimer = 0;
+const skipCaseLog = new Set<string>();
 const openApiIds = new Set<string>();
 const closedApiIds = new Set<string>();
 let query: Query = parseQuery("");
@@ -194,6 +205,36 @@ function touchCase(api: ApiItem, item: CaseItem) {
   touchApi(api);
 }
 
+type LogCategory = "create" | "update" | "delete" | "run";
+
+function recordLog(entry: {
+  category: LogCategory;
+  action: string;
+  system?: SystemItem;
+  api?: ApiItem;
+  target?: string;
+  detail?: string;
+  result?: string;
+}) {
+  const target = entry.target ?? (entry.api ? `${entry.api.method} ${entry.api.path}` : (entry.system?.name ?? ""));
+  void appendLog({
+    category: entry.category,
+    action: entry.action,
+    systemId: entry.system?.id ?? "",
+    systemName: entry.system?.name ?? "",
+    apiId: entry.api?.id ?? "",
+    target,
+    detail: entry.detail ?? "",
+    result: entry.result ?? "",
+  })
+    .then(() => {
+      if (logView) {
+        void loadLogs();
+      }
+    })
+    .catch(() => {});
+}
+
 /* 本机记录 */
 
 function readList(key: string): string[] {
@@ -230,6 +271,7 @@ function toggleCollapsed(domain: string) {
 function selectSystem(id: string) {
   if (id) {
     domainView = "";
+    logView = false;
   }
   if (id !== selectedId) {
     methodFilter = "";
@@ -419,7 +461,7 @@ function visibleApis(system: SystemItem): ApiItem[] {
 }
 
 function syncSelection() {
-  if (!searching() || domainView) {
+  if (!searching() || domainView || logView) {
     return;
   }
   const visible = orderedSystems(library.systems.filter(matches));
@@ -497,6 +539,7 @@ function submitSystem(form: HTMLFormElement) {
   library.systems.push(system);
   selectSystem(system.id);
   closeSystemDialog();
+  recordLog({ category: "create", action: "新增系统", system });
   scheduleSave();
   render();
 }
@@ -797,6 +840,7 @@ function showDomain(domain: string) {
   if (domain === "最近" || domain === "收藏") {
     return;
   }
+  logView = false;
   if (readCollapsed().has(domain)) {
     toggleCollapsed(domain);
   }
@@ -1147,7 +1191,9 @@ function startSystemRename(system: SystemItem) {
     if (save && !next) {
       notify("系统名不能为空");
     } else if (save && next !== system.name) {
+      const previous = system.name;
       system.name = next;
+      recordLog({ category: "update", action: "修改系统", system, detail: `${previous} → ${next}` });
       scheduleSave();
     }
     render();
@@ -1286,6 +1332,12 @@ function onSearchKey(event: KeyboardEvent) {
 }
 
 function renderCrumb(system: SystemItem | undefined) {
+  if (logView) {
+    crumbDomain.textContent = "";
+    crumbName.textContent = "日志";
+    crumbCount.textContent = logRows.length ? `最近 ${logRows.length} 条` : "";
+    return;
+  }
   if (domainView) {
     const count = library.systems.filter((item) => (item.domain || "其他") === domainView).length;
     crumbDomain.textContent = domainView;
@@ -1305,7 +1357,7 @@ function renderCrumb(system: SystemItem | undefined) {
 }
 
 function setConfigOpen(open: boolean) {
-  configOpen = open && !domainView && Boolean(selectedSystem());
+  configOpen = open && !domainView && !logView && Boolean(selectedSystem());
   applyConfigChrome();
 }
 
@@ -1587,11 +1639,162 @@ function renderDomainPage(domain: string): HTMLElement {
   return page;
 }
 
+const LOG_CATEGORIES: Array<[string, string]> = [
+  ["", "全部"],
+  ["create", "新增"],
+  ["update", "修改"],
+  ["delete", "删除"],
+  ["run", "执行"],
+];
+
+function logTime(at: number): string {
+  const date = new Date(at);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function showLogs() {
+  logView = true;
+  domainView = "";
+  configOpen = false;
+  logLoading = true;
+  render();
+  void loadLogs();
+}
+
+async function loadLogs() {
+  const seq = ++logSeq;
+  logLoading = true;
+  try {
+    const rows = await queryLogs(logCategory, logKeyword);
+    if (seq !== logSeq || !logView) {
+      return;
+    }
+    logRows = rows;
+  } catch (error) {
+    if (seq !== logSeq || !logView) {
+      return;
+    }
+    logRows = [];
+    notify(`日志读取失败：${String(error)}`, true);
+  }
+  logLoading = false;
+  if (!logView) {
+    return;
+  }
+  const list = document.querySelector("#log-list");
+  if (list instanceof HTMLElement) {
+    paintLogList(list);
+  }
+  renderCrumb(undefined);
+}
+
+function openLoggedApi(row: LogEntry) {
+  const system = library.systems.find((item) => item.id === row.systemId);
+  const api = system?.apis.find((item) => item.id === row.apiId);
+  if (!system || !api) {
+    notify("这条接口已经不在了");
+    return;
+  }
+  logView = false;
+  goToApi(system, api);
+}
+
+function paintLogList(list: HTMLElement) {
+  list.replaceChildren();
+  if (logRows.length === 0) {
+    list.append(el("p", "filter-empty", logLoading ? "正在读取" : logKeyword || logCategory ? "没有匹配的日志" : "还没有日志"));
+    return;
+  }
+  for (const row of logRows) {
+    const item = el("article", logOpenId === row.id ? "log-item open" : "log-item");
+    const head = el("button", "log-row");
+    head.type = "button";
+    head.append(
+      el("span", `log-cat ${row.category}`, LOG_CATEGORIES.find(([value]) => value === row.category)?.[1] ?? row.category),
+      el("span", "log-action", row.action),
+      el("span", "log-target", row.target),
+      el("span", "log-system", row.systemName),
+      el("time", "", logTime(row.at)),
+    );
+    head.addEventListener("click", () => {
+      logOpenId = logOpenId === row.id ? 0 : row.id;
+      paintLogList(list);
+    });
+    item.append(head);
+    if (logOpenId === row.id) {
+      const body = el("div", "log-body");
+      if (row.detail) {
+        body.append(el("p", "", row.detail));
+      }
+      if (row.result) {
+        body.append(el("pre", "", row.result));
+      }
+      if (row.systemId && row.apiId) {
+        body.append(button("打开接口", "ghost", () => openLoggedApi(row)));
+      }
+      item.append(body);
+    }
+    list.append(item);
+  }
+  if (logRows.length >= 200) {
+    list.append(el("p", "log-more", "只显示最近 200 条，可以用关键字缩小"));
+  }
+}
+
+function renderLogPage(): HTMLElement {
+  const page = el("section", "log-page");
+  const tools = el("div", "log-tools");
+  const filters = el("div", "method-filter");
+  for (const [value, label] of LOG_CATEGORIES) {
+    const node = button(label, logCategory === value ? "on" : "", () => {
+      logCategory = value;
+      logOpenId = 0;
+      logRows = [];
+      logLoading = true;
+      filters.querySelectorAll("button").forEach((item, index) => {
+        item.classList.toggle("on", LOG_CATEGORIES[index][0] === value);
+      });
+      paintLogList(list);
+      void loadLogs();
+    });
+    filters.append(node);
+  }
+  const input = el("input", "log-search");
+  input.placeholder = "搜索系统、接口或结果";
+  input.value = logKeyword;
+  input.spellcheck = false;
+  input.addEventListener("input", () => {
+    logKeyword = input.value.trim();
+    window.clearTimeout(logTimer);
+    logTimer = window.setTimeout(() => {
+      logOpenId = 0;
+      void loadLogs();
+    }, 200);
+  });
+  tools.append(filters, input);
+  const list = el("div", "log-list");
+  list.id = "log-list";
+  paintLogList(list);
+  page.append(tools, list);
+  return page;
+}
+
 function renderDetail() {
   parkActions();
   const scrollTop = detail.scrollTop;
   detail.replaceChildren();
   const top = document.querySelector(".top");
+  document.querySelector("#log-toggle")?.classList.toggle("on", logView);
+  if (logView) {
+    top?.classList.remove("system-open");
+    top?.classList.remove("domain-open");
+    renderCrumb(undefined);
+    renderConfig(undefined);
+    detail.append(renderLogPage());
+    detail.scrollTop = scrollTop;
+    return;
+  }
   if (domainView) {
     top?.classList.remove("system-open");
     top?.classList.add("domain-open");
@@ -1668,6 +1871,7 @@ function renderSystemHead(system: SystemItem): HTMLElement {
       if (!ok) {
         return;
       }
+      recordLog({ category: "delete", action: "删除系统", system, detail: system.name || "未命名" });
       library.systems = library.systems.filter((item) => item.id !== system.id);
       selectSystem("");
       scheduleSave();
@@ -2483,6 +2687,7 @@ function renameApiGroup(system: SystemItem, from: string, to: string) {
   if (groupFilter === from) {
     groupFilter = next;
   }
+  recordLog({ category: "update", action: "修改分组", system, detail: `${from} → ${next}` });
   scheduleSave();
 }
 
@@ -2506,6 +2711,7 @@ async function removeGroup(system: SystemItem, name: string) {
   if (groupFilter === name) {
     groupFilter = null;
   }
+  recordLog({ category: "delete", action: "删除分组", system, detail: name });
   scheduleSave();
   render();
 }
@@ -2948,11 +3154,16 @@ function groupButton(system: SystemItem, api: ApiItem): HTMLElement {
   ensureGroups(system);
   const assign = (name: string) => {
     const next = name.trim();
+    if (groupName(api) === next) {
+      pop.hidden = true;
+      return;
+    }
     if (next && !system.groups.includes(next)) {
       system.groups.push(next);
     }
     api.group = next;
     touchApi(api);
+    recordLog({ category: "update", action: "修改分组", system, api, detail: next || "未分组" });
     scheduleSave();
     render();
   };
@@ -3073,12 +3284,20 @@ function renderCurlAdd(system: SystemItem): HTMLElement {
         };
         if (!found) {
           system.apis.push(api);
+          recordLog({ category: "create", action: "新增接口", system, api });
         }
         const same = api.cases.find((item) => item.content === parsed.content);
         const caseItem: CaseItem = same ?? { id: uid(), content: parsed.content, updatedAt: Date.now() };
         if (!same) {
           api.cases.push(caseItem);
           touchApi(api);
+          recordLog({
+            category: "create",
+            action: "新增用例",
+            system,
+            api,
+            detail: caseTitle(caseItem.content, api.cases.length - 1),
+          });
         }
         showApi(api.id);
         scheduleSave();
@@ -3119,6 +3338,7 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
   const star = button(api.starred ? "★" : "☆", api.starred ? "star on" : "star", () => {
     api.starred = !api.starred;
     touchApi(api);
+    recordLog({ category: "update", action: api.starred ? "收藏接口" : "取消收藏", system, api });
     scheduleSave();
     render();
   }, api.starred ? "取消收藏" : "收藏");
@@ -3152,6 +3372,13 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
             }
           }
           touchApi(target);
+          recordLog({
+            category: "update",
+            action: "合并接口",
+            system,
+            api: target,
+            detail: `并入 ${api.method} ${api.path} 的 ${api.cases.length} 条用例`,
+          });
           system.apis = system.apis.filter((item) => item.id !== api.id);
           showApi(target.id);
           scheduleSave();
@@ -3172,6 +3399,7 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
         if (!ok) {
           return;
         }
+        recordLog({ category: "delete", action: "删除接口", system, api, detail: `${api.cases.length} 条用例` });
         system.apis = system.apis.filter((item) => item.id !== api.id);
         scheduleSave();
         render();
@@ -3194,10 +3422,16 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
     const note = el("input", "api-note");
     note.placeholder = "接口备注，如 幂等、需要 x-tenant 头";
     note.value = api.note;
+    const noteBefore = api.note;
     note.addEventListener("input", () => {
       api.note = note.value;
       touchApi(api);
       scheduleSave();
+    });
+    note.addEventListener("blur", () => {
+      if (note.value !== noteBefore) {
+        recordLog({ category: "update", action: "修改备注", system, api, detail: note.value.trim() || "已清空" });
+      }
     });
     note.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === "Escape") {
@@ -3294,6 +3528,7 @@ function submitPath(event: Event) {
   }
   api.path = next;
   touchApi(api);
+  recordLog({ category: "update", action: "修改路径", system, api, detail: `${from} → ${next}` });
   scheduleSave();
   closePathDialog();
   render();
@@ -3418,6 +3653,8 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
   }
 
   const format = button(formatBackup.has(item.id) ? "还原" : "格式化", "", () => {
+    const before = item.content;
+    const formatting = !formatBackup.has(item.id);
     if (formatBackup.has(item.id)) {
       item.content = formatBackup.get(item.id) ?? item.content;
       formatBackup.delete(item.id);
@@ -3433,6 +3670,16 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
       }
       formatBackup.set(item.id, item.content);
       item.content = formatted;
+    }
+    if (item.content !== before) {
+      skipCaseLog.add(item.id);
+      recordLog({
+        category: "update",
+        action: "修改用例",
+        system,
+        api,
+        detail: `${formatting ? "格式化" : "还原"} · ${caseTitle(item.content, index)}`,
+      });
     }
     touchCase(api, item);
     scheduleSave();
@@ -3451,6 +3698,7 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
     api.cases.splice(index + 1, 0, copyItem);
     touchApi(api);
     showApi(api.id);
+    recordLog({ category: "create", action: "新增用例", system, api, detail: caseTitle(copyItem.content, index + 1) });
     scheduleSave();
     renderDetail();
     focusCase(copyItem.id);
@@ -3461,6 +3709,7 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
       if (!ok) {
         return;
       }
+      recordLog({ category: "delete", action: "删除用例", system, api, detail: caseTitle(item.content, index) });
       api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
       touchApi(api);
       scheduleSave();
@@ -3545,6 +3794,10 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
     placeRunButtons();
     requestAnimationFrame(placeRunButtons);
   };
+  let caseSnapshot = item.content;
+  area.addEventListener("focus", () => {
+    caseSnapshot = area.value;
+  });
   area.addEventListener("input", () => {
     item.content = area.value;
     formatBackup.delete(item.id);
@@ -3595,21 +3848,42 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
   area.addEventListener("mouseup", checkSelection);
   area.addEventListener("keyup", checkSelection);
   area.addEventListener("blur", () => {
+    const previous = caseSnapshot;
+    const next = area.value;
     window.setTimeout(() => {
       if (document.activeElement === area || varBar.contains(document.activeElement)) {
         return;
       }
       varBar.hidden = true;
-      if (area.value.trim() || !api.cases.some((caseItem) => caseItem.id === item.id)) {
+      if (skipCaseLog.delete(item.id)) {
         return;
       }
-      const focusId = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.case ?? "" : "";
-      api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
-      touchApi(api);
-      scheduleSave();
-      renderDetail();
-      if (focusId) {
-        focusCase(focusId);
+      if (!api.cases.some((caseItem) => caseItem.id === item.id)) {
+        return;
+      }
+      if (!next.trim()) {
+        if (previous.trim()) {
+          recordLog({ category: "delete", action: "删除用例", system, api, detail: caseTitle(previous, index) });
+        }
+        const focusId = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.case ?? "" : "";
+        api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
+        touchApi(api);
+        scheduleSave();
+        renderDetail();
+        if (focusId) {
+          focusCase(focusId);
+        }
+        return;
+      }
+      if (next !== previous) {
+        recordLog({
+          category: previous.trim() ? "update" : "create",
+          action: previous.trim() ? "修改用例" : "新增用例",
+          system,
+          api,
+          detail: caseTitle(next, index),
+        });
+        caseSnapshot = next;
       }
     }, 150);
   });
@@ -3663,6 +3937,31 @@ function focusCase(caseId: string) {
 
 /* 运行 */
 
+function describeRun(result: RunResult): string {
+  const status = result.timedOut ? "超时" : result.killed ? "已停止" : `退出码 ${result.code ?? "?"}`;
+  const chunks = [`${status} · ${result.millis} ms`];
+  if (result.stdout) {
+    chunks.push(result.stdout);
+  }
+  if (result.stderr.trim()) {
+    chunks.push(`stderr:\n${result.stderr}`);
+  }
+  return chunks.join("\n\n");
+}
+
+function recordRun(system: SystemItem, item: CaseItem, index: number, result: string) {
+  const api = system.apis.find((candidate) => candidate.cases.some((caseItem) => caseItem.id === item.id));
+  const title = caseTitle(item.content, api?.cases.findIndex((caseItem) => caseItem.id === item.id) ?? 0);
+  recordLog({
+    category: "run",
+    action: "执行用例",
+    system,
+    api,
+    detail: index > 0 ? `${title} · 第 ${index + 1} 条` : title,
+    result,
+  });
+}
+
 async function runCase(system: SystemItem, item: CaseItem, index = 0, source = item.content) {
   const current = runs.get(item.id);
   if (current?.running) {
@@ -3681,11 +3980,13 @@ async function runCase(system: SystemItem, item: CaseItem, index = 0, source = i
   paintRunPanel(item);
   try {
     const result = await runCommand(runId, command);
+    recordRun(system, item, index, describeRun(result));
     if (runs.get(item.id)?.runId !== runId) {
       return;
     }
     runs.set(item.id, { runId, running: false, index, result });
   } catch (error) {
+    recordRun(system, item, index, String(error));
     if (runs.get(item.id)?.runId !== runId) {
       return;
     }
@@ -3832,6 +4133,14 @@ function moveCase(api: ApiItem, item: CaseItem) {
           target.cases.push(item);
           touchApi(api);
           touchCase(target, item);
+          const from = library.systems.find((candidate) => candidate.apis.includes(api));
+          recordLog({
+            category: "update",
+            action: "移动用例",
+            system: targetSystem,
+            api: target,
+            detail: `从 ${from?.name || "未命名"} 的 ${api.method} ${api.path}`,
+          });
           scheduleSave();
           jumpToApi(targetSystem.id, target.id);
           notify(`已移动到 ${target.method} ${target.path}`);
@@ -3859,6 +4168,13 @@ function moveApi(system: SystemItem, api: ApiItem) {
             }
           }
           touchApi(existing);
+          recordLog({
+            category: "update",
+            action: "移动接口",
+            system: target,
+            api: existing,
+            detail: `从 ${system.name} 并入 ${api.cases.length} 条用例`,
+          });
           scheduleSave();
           jumpToApi(target.id, existing.id);
           notify(`已并入 ${target.name} 的 ${existing.method} ${existing.path}`);
@@ -3866,6 +4182,7 @@ function moveApi(system: SystemItem, api: ApiItem) {
         }
         target.apis.push(api);
         touchApi(api);
+        recordLog({ category: "update", action: "移动接口", system: target, api, detail: `从 ${system.name}` });
         scheduleSave();
         jumpToApi(target.id, api.id);
         notify(`已移动到 ${target.name}`);
@@ -4258,6 +4575,7 @@ async function onImport() {
     }
     resetOpenState();
     hideToast();
+    recordLog({ category: "create", action: "导入 Markdown", detail: `${library.systems.length} 个系统` });
     notify(`导入完成，当前 ${library.systems.length} 个系统`);
     setSaveState("saved");
     render();
@@ -4330,6 +4648,12 @@ async function submitYapi() {
     localStorage.setItem(`yapi-${system.id}`, JSON.stringify(config));
     localStorage.setItem("yapi-base", config.base);
     const { added, skipped, envs } = mergeYapi(system, project);
+    recordLog({
+      category: "create",
+      action: "从 YApi 导入",
+      system,
+      detail: `新增 ${added} 个接口，跳过 ${skipped} 个`,
+    });
     closeYapiDialog();
     scheduleSave();
     render();
@@ -4899,6 +5223,14 @@ function init() {
       openApiIds.clear();
     }
     render();
+  });
+  document.querySelector("#log-toggle")?.addEventListener("click", () => {
+    if (logView) {
+      logView = false;
+      render();
+      return;
+    }
+    showLogs();
   });
   document.querySelector("#import")?.addEventListener("click", () => {
     void onImport();

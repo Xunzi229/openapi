@@ -58,6 +58,19 @@ export interface YapiProject {
   apis: ApiItem[];
 }
 
+export interface LogEntry {
+  id: number;
+  at: number;
+  category: string;
+  action: string;
+  systemId: string;
+  systemName: string;
+  apiId: string;
+  target: string;
+  detail: string;
+  result: string;
+}
+
 export interface RunResult {
   code: number | null;
   stdout: string;

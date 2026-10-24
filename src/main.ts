@@ -849,6 +849,65 @@ function showDomain(domain: string) {
   render();
 }
 
+function openSiblingMenu(anchor: HTMLElement, system: SystemItem) {
+  let menu = document.getElementById("system-switch-menu");
+  if (!menu) {
+    menu = el("div", "pop");
+    menu.id = "system-switch-menu";
+    document.body.append(menu);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+  }
+  if (!menu.hidden && menu.dataset.system === system.id) {
+    menu.hidden = true;
+    return;
+  }
+  const domain = system.domain || "其他";
+  const members = library.systems.filter((item) => (item.domain || "其他") === domain);
+  menu.dataset.system = system.id;
+  const head = el("div", "switch-head");
+  head.append(el("strong", "", domain), el("em", "", `${members.length} 个系统`));
+  const list = el("div", "switch-list");
+  list.append(
+    ...members.map((item) => {
+      const node = button("", item.id === system.id ? "item on" : "item", () => {
+        menu!.hidden = true;
+        if (item.id !== system.id || domainView) {
+          openSystemPage(item);
+        }
+      });
+      const label = el("span", "", item.name || "未命名");
+      if (item.color) {
+        const dot = el("i");
+        dot.style.background = item.color;
+        node.append(dot);
+      }
+      node.append(label, el("em", "", String(item.apis.length)));
+      return node;
+    }),
+  );
+  menu.replaceChildren(head, list);
+  closePops(menu);
+  menu.hidden = false;
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.zIndex = "60";
+  const rect = anchor.getBoundingClientRect();
+  const margin = 8;
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  let left = rect.left;
+  if (left + width > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - width - margin);
+  }
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - margin) {
+    top = Math.max(margin, rect.top - height - 6);
+  }
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.querySelector(".on")?.scrollIntoView({ block: "nearest" });
+}
+
 function openSystemPage(system: SystemItem) {
   const fromDomain = domainView !== "";
   selectSystem(system.id);
@@ -1848,6 +1907,10 @@ function renderSystemHead(system: SystemItem): HTMLElement {
   if (system.color) {
     name.style.color = system.color;
   }
+  name.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openSiblingMenu(name, system);
+  });
   name.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();

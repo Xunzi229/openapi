@@ -1192,6 +1192,110 @@ button.domain em {
   color: var(--accent);
 }
 
+#system-switch-menu {
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 320px;
+  max-width: min(520px, calc(100vw - 24px));
+  max-height: min(440px, 70vh);
+  overflow: hidden;
+  padding: 8px 8px 6px;
+  border-radius: 14px;
+}
+
+#system-switch-menu[hidden] {
+  display: none;
+}
+
+#system-switch-menu .switch-list {
+  overflow: auto;
+  min-height: 0;
+}
+
+#system-switch-menu .switch-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 2px 6px;
+  padding: 4px 10px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+#system-switch-menu .switch-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#system-switch-menu .switch-head em {
+  flex: none;
+  font-style: normal;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#system-switch-menu .item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: auto;
+  min-width: 100%;
+  height: auto;
+  min-height: 34px;
+  margin-top: 2px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+#system-switch-menu .item:hover,
+#system-switch-menu .item:active {
+  background: var(--bg);
+}
+
+#system-switch-menu .item i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+#system-switch-menu .item span {
+  flex: 0 1 auto;
+  white-space: nowrap;
+}
+
+#system-switch-menu .item em {
+  flex: none;
+  min-width: 1.6em;
+  margin-left: auto;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: right;
+  color: var(--muted);
+}
+
+#system-switch-menu .item.on,
+#system-switch-menu .item.on:hover,
+#system-switch-menu .item.on:active {
+  background: var(--accent-soft);
+  box-shadow: none;
+  font-weight: 400;
+}
+
+#system-switch-menu .item.on em {
+  color: var(--accent);
+}
+
 #system-menu .item {
   display: flex;
   align-items: center;
@@ -1552,7 +1656,13 @@ button.domain em {
   color: var(--fg);
 }
 
+.system-head .name:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .system-head .name {
+  cursor: pointer;
   flex: 0 1 auto;
   min-width: 4ch;
   max-width: 70%;
@@ -2981,7 +3091,7 @@ button.domain-system {
 .finder {
   position: fixed;
   z-index: 70;
-  top: 12px;
+  top: 33vh;
   left: 50%;
   transform: translateX(-50%);
   width: min(920px, calc(100vw - 32px));
@@ -3013,7 +3123,7 @@ button.domain-system {
 }
 
 #finder-list {
-  max-height: min(60vh, 520px);
+  max-height: min(52vh, calc(100vh - 33vh - 78px));
   overflow: auto;
   padding: 6px;
 }

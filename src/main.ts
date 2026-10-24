@@ -586,6 +586,44 @@ function jumpToApi(systemId: string, apiId: string) {
   focusApiRow(apiId);
 }
 
+function clearSidebarSearch() {
+  if (!search.value) {
+    return;
+  }
+  search.value = "";
+  query = parseQuery("");
+  sidebarCursor = "";
+}
+
+function revealSystem(system: SystemItem) {
+  const domain = system.domain || "其他";
+  if (readCollapsed().has(domain)) {
+    toggleCollapsed(domain);
+  }
+}
+
+function goToSystem(system: SystemItem) {
+  clearSidebarSearch();
+  methodFilter = "";
+  groupFilter = null;
+  revealSystem(system);
+  openSystemPage(system);
+}
+
+function goToApi(system: SystemItem, api: ApiItem) {
+  clearSidebarSearch();
+  methodFilter = "";
+  groupFilter = null;
+  revealSystem(system);
+  const collapsed = collapsedApiGroups(system.id);
+  const name = groupName(api);
+  if (collapsed.has(name)) {
+    collapsed.delete(name);
+    writeList(`api-groups:${system.id}`, [...collapsed]);
+  }
+  jumpToApi(system.id, api.id);
+}
+
 /* 渲染 */
 
 function render() {
@@ -663,46 +701,64 @@ function domainGroup(domain: string, count: number, folded: boolean): HTMLElemen
   title.type = "button";
   const name = el("span", "", domain);
   const editable = domain !== "最近" && domain !== "收藏";
-  if (editable) {
-    name.dataset.editable = "1";
-    name.title = "双击修改名称";
-  }
   title.append(el("i"), name, el("em", "", String(count)));
   if (domainView === domain) {
     title.classList.add("on");
   }
-  let openTimer = 0;
   title.addEventListener("click", (event) => {
     const onChevron = event.target instanceof Element && Boolean(event.target.closest("i"));
     if (onChevron || !editable) {
-      window.clearTimeout(openTimer);
       toggleCollapsed(domain);
       renderSidebar();
       return;
     }
-    window.clearTimeout(openTimer);
-    openTimer = window.setTimeout(() => showDomain(domain), 180);
+    showDomain(domain);
   });
   if (editable) {
-    name.addEventListener("dblclick", (event) => {
+    title.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      window.clearTimeout(openTimer);
-      editDomain(group, domain);
+      openDomainActionMenu(event.clientX, event.clientY, group, domain);
     });
   }
   const row = el("div", "domain-row");
   row.append(title);
-  if (editable) {
-    const actions = el("div", "domain-actions");
-    actions.append(button("改名", "mini", () => editDomain(group, domain)));
-    if (domain !== "其他") {
-      actions.append(button("删除", "mini danger", () => void deleteDomain(domain)));
-    }
-    row.append(actions);
-  }
   group.append(row);
   return group;
+}
+
+function openDomainActionMenu(x: number, y: number, group: HTMLElement, domain: string) {
+  let menu = document.getElementById("domain-menu");
+  if (!menu) {
+    menu = el("div", "pop");
+    menu.id = "domain-menu";
+    document.body.append(menu);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+  }
+  const items = [
+    button("修改名称", "item", () => {
+      menu!.hidden = true;
+      editDomain(group, domain);
+    }),
+  ];
+  if (domain !== "其他") {
+    items.push(
+      button("删除", "item danger", () => {
+        menu!.hidden = true;
+        void deleteDomain(domain);
+      }),
+    );
+  }
+  menu.replaceChildren(...items);
+  closePops(menu);
+  menu.hidden = false;
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.zIndex = "60";
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
 }
 
 function editDomain(group: HTMLElement, domain: string) {
@@ -747,65 +803,6 @@ function showDomain(domain: string) {
   domainView = domain;
   configOpen = false;
   render();
-}
-
-function openSiblingMenu(anchor: HTMLElement, system: SystemItem) {
-  let menu = document.getElementById("system-switch-menu");
-  if (!menu) {
-    menu = el("div", "pop");
-    menu.id = "system-switch-menu";
-    document.body.append(menu);
-    menu.addEventListener("click", (event) => event.stopPropagation());
-  }
-  if (!menu.hidden && menu.dataset.system === system.id) {
-    menu.hidden = true;
-    return;
-  }
-  const domain = system.domain || "其他";
-  const members = library.systems.filter((item) => (item.domain || "其他") === domain);
-  menu.dataset.system = system.id;
-  const head = el("div", "switch-head");
-  head.append(el("strong", "", domain), el("em", "", `${members.length} 个系统`));
-  const list = el("div", "switch-list");
-  list.append(
-    ...members.map((item) => {
-      const node = button("", item.id === system.id ? "item on" : "item", () => {
-        menu!.hidden = true;
-        if (item.id !== system.id || domainView) {
-          openSystemPage(item);
-        }
-      });
-      const label = el("span", "", item.name || "未命名");
-      if (item.color) {
-        const dot = el("i");
-        dot.style.background = item.color;
-        node.append(dot);
-      }
-      node.append(label, el("em", "", String(item.apis.length)));
-      return node;
-    }),
-  );
-  menu.replaceChildren(head, list);
-  closePops(menu);
-  menu.hidden = false;
-  menu.style.position = "fixed";
-  menu.style.right = "auto";
-  menu.style.zIndex = "60";
-  const rect = anchor.getBoundingClientRect();
-  const margin = 8;
-  const width = menu.offsetWidth;
-  const height = menu.offsetHeight;
-  let left = rect.left;
-  if (left + width > window.innerWidth - margin) {
-    left = Math.max(margin, window.innerWidth - width - margin);
-  }
-  let top = rect.bottom + 6;
-  if (top + height > window.innerHeight - margin) {
-    top = Math.max(margin, rect.top - height - 6);
-  }
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-  menu.querySelector(".on")?.scrollIntoView({ block: "nearest" });
 }
 
 function openSystemPage(system: SystemItem) {
@@ -998,23 +995,7 @@ function openSystemMenu(x: number, y: number, system: SystemItem) {
       scheduleHideColorMenu();
     });
   }
-  const createItem = button("新建分组", "item", () => {
-    hideColorMenu();
-    menu!.hidden = true;
-    if (searching()) {
-      search.value = "";
-      search.dispatchEvent(new Event("input"));
-    }
-    if (selectedId !== system.id) {
-      selectSystem(system.id);
-    }
-    groupsOpen = true;
-    openGroupCreate();
-  });
-  if (menuHover) {
-    createItem.addEventListener("pointerenter", () => hideColorMenu());
-  }
-  menu.replaceChildren(renameItem, createItem, domainItem, colorItem);
+  menu.replaceChildren(renameItem, domainItem, colorItem);
   closePops(menu);
   menu.hidden = false;
   menu.style.position = "fixed";
@@ -1664,10 +1645,6 @@ function renderSystemHead(system: SystemItem): HTMLElement {
   if (system.color) {
     name.style.color = system.color;
   }
-  name.addEventListener("click", (event) => {
-    event.stopPropagation();
-    openSiblingMenu(name, system);
-  });
   name.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -2886,9 +2863,13 @@ function systemGroupNav(system: SystemItem): HTMLElement {
   return list;
 }
 
+function showApiGroups(): boolean {
+  return localStorage.getItem("show-api-groups") !== "0";
+}
+
 function appendApiGroups(system: SystemItem, apis: ApiItem[]) {
   ensureGroups(system);
-  if (system.groups.length === 0 && groupFilter === null) {
+  if (!showApiGroups() || (system.groups.length === 0 && groupFilter === null)) {
     for (const api of apis) {
       detail.append(renderApi(system, api));
     }
@@ -3024,7 +3005,11 @@ function renderApiHead(system: SystemItem): HTMLElement {
       }),
     );
   }
-  head.append(filters, el("div", "spacer"), button("新建分组", "ghost", () => openGroupCreate()), button("全部展开", "ghost", expandAll), button("全部收起", "ghost", collapseAll));
+  const tools = [button("新建分组", "ghost", () => openGroupCreate())];
+  if (showApiGroups()) {
+    tools.push(button("全部展开", "ghost", expandAll), button("全部收起", "ghost", collapseAll));
+  }
+  head.append(filters, el("div", "spacer"), ...tools);
   return head;
 }
 
@@ -3926,6 +3911,7 @@ function jumpItems(): PickItem[] {
 }
 
 function openPalette() {
+  closeFinder();
   paletteRecentKey = "palette-recent";
   openPicker("", jumpItems());
 }
@@ -4057,6 +4043,200 @@ function initPalette() {
   yapiDialog.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closeYapiDialog();
+    }
+  });
+}
+
+/* 查找 */
+
+const finder = document.querySelector("#finder") as HTMLElement;
+const finderInput = document.querySelector("#finder-input") as HTMLInputElement;
+const finderList = document.querySelector("#finder-list") as HTMLElement;
+let finderIndex = 0;
+
+interface FinderRow {
+  system: SystemItem;
+  api: ApiItem | null;
+  more: boolean;
+}
+
+function finderSystemNamed(system: SystemItem, parsed: Query): boolean {
+  if (parsed.method || parsed.path || parsed.title) {
+    return false;
+  }
+  const blob = `${system.name}\n${system.domain || ""}`.toLowerCase();
+  if (parsed.sys && !blob.includes(parsed.sys)) {
+    return false;
+  }
+  if (!parsed.text) {
+    return Boolean(parsed.sys);
+  }
+  return blob.includes(parsed.text);
+}
+
+function finderApiNamed(api: ApiItem, parsed: Query): boolean {
+  if (parsed.method && api.method.toLowerCase() !== parsed.method) {
+    return false;
+  }
+  if (parsed.path && !api.path.toLowerCase().includes(parsed.path)) {
+    return false;
+  }
+  if (parsed.title) {
+    const titles = api.cases.map((item, index) => caseTitle(item.content, index)).join("\n").toLowerCase();
+    if (!titles.includes(parsed.title)) {
+      return false;
+    }
+  }
+  if (parsed.text && !`${api.method}\n${api.path}\n${api.note}`.toLowerCase().includes(parsed.text)) {
+    return false;
+  }
+  return Boolean(parsed.method || parsed.path || parsed.title || parsed.text);
+}
+
+function collectFinder(raw: string): { rows: FinderRow[]; capped: boolean } {
+  const parsed = parseQuery(raw);
+  if (parsed.empty) {
+    return { rows: [], capped: false };
+  }
+  const rows: FinderRow[] = [];
+  let shown = 0;
+  let capped = false;
+  for (const system of library.systems) {
+    if (parsed.sys && !`${system.name}\n${system.domain || ""}`.toLowerCase().includes(parsed.sys)) {
+      continue;
+    }
+    const named = finderSystemNamed(system, parsed);
+    const listed = named ? system.apis : system.apis.filter((api) => finderApiNamed(api, parsed));
+    if (!named && listed.length === 0) {
+      continue;
+    }
+    const room = 80 - shown;
+    if (room <= 0) {
+      capped = true;
+      break;
+    }
+    const take = listed.slice(0, Math.min(40, room));
+    if (take.length < listed.length) {
+      capped = true;
+    }
+    rows.push({ system, api: null, more: take.length < listed.length });
+    for (const api of take) {
+      rows.push({ system, api, more: false });
+      shown += 1;
+    }
+  }
+  return { rows, capped };
+}
+
+function scrollFinderHit(node: HTMLElement) {
+  const top = node.offsetTop - finderList.offsetTop;
+  const bottom = top + node.offsetHeight;
+  if (top < finderList.scrollTop) {
+    finderList.scrollTop = top;
+  } else if (bottom > finderList.scrollTop + finderList.clientHeight) {
+    finderList.scrollTop = bottom - finderList.clientHeight;
+  }
+}
+
+function paintFinder(reset: boolean) {
+  const { rows, capped } = collectFinder(finderInput.value);
+  finderList.replaceChildren();
+  if (parseQuery(finderInput.value).empty) {
+    finderList.hidden = true;
+    finderIndex = 0;
+    return;
+  }
+  finderList.hidden = false;
+  if (reset) {
+    const firstApi = rows.findIndex((row) => row.api);
+    finderIndex = firstApi >= 0 ? firstApi : 0;
+  } else if (rows.length === 0) {
+    finderIndex = 0;
+  } else if (finderIndex >= rows.length) {
+    finderIndex = rows.length - 1;
+  }
+  if (rows.length === 0) {
+    finderList.append(el("p", "finder-empty", "没有匹配"));
+    return;
+  }
+  rows.forEach((row, index) => {
+    const hit = button("", index === finderIndex ? "finder-hit on" : "finder-hit", () => pickFinder(row));
+    hit.classList.add(row.api ? "api" : "system");
+    hit.addEventListener("mousemove", (event) => {
+      if ((event.movementX === 0 && event.movementY === 0) || finderIndex === index) {
+        return;
+      }
+      finderIndex = index;
+      paintFinder(false);
+    });
+    if (row.api) {
+      hit.append(el("span", `method method-${row.api.method.toLowerCase()}`, row.api.method));
+      hit.append(el("span", "path", row.api.path));
+      const group = groupName(row.api);
+      if (group) {
+        hit.append(el("span", "meta", group));
+      }
+    } else {
+      const name = el("span", "name", row.system.name || "未命名");
+      if (row.system.color) {
+        name.style.color = row.system.color;
+      }
+      hit.append(name, el("span", "meta", row.more ? `${row.system.domain || "其他"} · 还有更多` : row.system.domain || "其他"));
+    }
+    finderList.append(hit);
+  });
+  if (capped) {
+    finderList.append(el("p", "finder-more", "还有更多结果，缩小关键字"));
+  }
+  const active = finderList.querySelector(".finder-hit.on");
+  if (active instanceof HTMLElement) {
+    scrollFinderHit(active);
+  }
+}
+
+function pickFinder(row: FinderRow) {
+  closeFinder();
+  if (row.api) {
+    goToApi(row.system, row.api);
+    return;
+  }
+  goToSystem(row.system);
+}
+
+function openFinder() {
+  closePops();
+  closePalette();
+  finder.hidden = false;
+  paintFinder(true);
+  finderInput.focus();
+  finderInput.select();
+}
+
+function closeFinder() {
+  finder.hidden = true;
+}
+
+function initFinder() {
+  finder.addEventListener("click", (event) => event.stopPropagation());
+  finderInput.addEventListener("input", () => paintFinder(true));
+  finderInput.addEventListener("keydown", (event) => {
+    const { rows } = collectFinder(finderInput.value);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (rows.length === 0) {
+        return;
+      }
+      finderIndex = Math.min(rows.length - 1, Math.max(0, finderIndex + (event.key === "ArrowDown" ? 1 : -1)));
+      paintFinder(false);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const row = rows[finderIndex];
+      if (row) {
+        pickFinder(row);
+      }
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeFinder();
     }
   });
 }
@@ -4410,6 +4590,15 @@ function initAppearance() {
     node.addEventListener("click", () => applyTheme((node.dataset.theme as Theme) ?? "system"));
   });
 
+  const showGroupsInput = document.querySelector("#show-api-groups") as HTMLInputElement | null;
+  if (showGroupsInput) {
+    showGroupsInput.checked = showApiGroups();
+    showGroupsInput.addEventListener("change", () => {
+      localStorage.setItem("show-api-groups", showGroupsInput.checked ? "1" : "0");
+      render();
+    });
+  }
+
   applySystemNameBg(localStorage.getItem("system-name-bg"));
   document.querySelector("#system-name-bg")?.addEventListener("input", (event) => {
     applySystemNameBg((event.currentTarget as HTMLInputElement).value);
@@ -4496,12 +4685,16 @@ function initAppearance() {
     event.preventDefault();
     event.stopPropagation();
   }, true);
-  document.addEventListener("click", () => closePops());
+  document.addEventListener("click", () => {
+    closePops();
+    closeFinder();
+  });
   detail.addEventListener("scroll", () => closePops(), { passive: true });
   systemList.addEventListener("scroll", () => closePops(), { passive: true });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closePops();
+      closeFinder();
     }
   });
 
@@ -4540,6 +4733,7 @@ function toggleNav() {
 }
 
 function focusSearch() {
+  closeFinder();
   setNavHidden(false);
   search.focus();
   search.select();
@@ -4547,6 +4741,7 @@ function focusSearch() {
 
 const SHORTCUTS = [
   `${modLabel}B  隐藏或显示侧栏`,
+  `${modLabel}F  查找系统和 URL，↑↓ 选择，↵ 跳转`,
   `${modLabel}K  聚焦搜索框，↑↓ 在结果里定位，↵ 进入`,
   `${modLabel}P  快速跳转`,
   `${modLabel}S  立刻保存`,
@@ -4593,6 +4788,9 @@ function handleMenu(id: string) {
       break;
     case "open-data-dir":
       void openDataDir().catch((error: unknown) => notify(`打不开目录：${String(error)}`, true));
+      break;
+    case "find":
+      openFinder();
       break;
     case "search":
       focusSearch();
@@ -4677,6 +4875,7 @@ function init() {
   }
   initAppearance();
   initPalette();
+  initFinder();
   onMenu(handleMenu);
 
   const config = document.querySelector("#config") as HTMLElement;
@@ -4775,7 +4974,14 @@ function init() {
       return;
     }
     const key = event.key.toLowerCase();
-    if (key === "k") {
+    if (key === "f" && !event.shiftKey && !event.altKey) {
+      const ask = document.querySelector("#ask") as HTMLElement | null;
+      if (ask && !ask.hidden) {
+        return;
+      }
+      event.preventDefault();
+      openFinder();
+    } else if (key === "k") {
       event.preventDefault();
       focusSearch();
     } else if (key === "b") {

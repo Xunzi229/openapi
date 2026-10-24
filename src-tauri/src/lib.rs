@@ -113,6 +113,9 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
         .select_all()
         .build()?;
 
+    let find = MenuItemBuilder::with_id("find", "查找")
+        .accelerator("CmdOrCtrl+F")
+        .build(app)?;
     let search = MenuItemBuilder::with_id("search", "搜索")
         .accelerator("CmdOrCtrl+K")
         .build(app)?;
@@ -132,6 +135,7 @@ fn build_menu(app: &tauri::App) -> tauri::Result<()> {
         .accelerator("CmdOrCtrl+Shift+W")
         .build(app)?;
     let view = SubmenuBuilder::new(app, "视图")
+        .item(&find)
         .item(&search)
         .item(&palette)
         .separator()

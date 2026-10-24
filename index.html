@@ -36,6 +36,13 @@
                 </div>
               </section>
               <section>
+                <h4>正文</h4>
+                <label class="check">
+                  <input id="show-api-groups" type="checkbox" checked />
+                  按分组显示
+                </label>
+              </section>
+              <section>
                 <h4>系统名称底色</h4>
                 <div class="row">
                   <input id="system-name-bg" type="color" value="#f4f1ea" />
@@ -125,6 +132,12 @@
           <button id="ask-ok" type="button" class="primary">确定</button>
         </div>
       </div>
+    </div>
+    <div id="finder" class="finder" hidden>
+      <div class="finder-bar">
+        <input id="finder-input" type="text" placeholder="搜索系统或 URL" autocomplete="off" spellcheck="false" />
+      </div>
+      <div id="finder-list" hidden></div>
     </div>
     <div id="palette" class="palette" hidden>
       <div class="palette-box">

@@ -2719,19 +2719,19 @@ function addGroup(system: SystemItem, raw: string): string {
   return next;
 }
 
-function renameApiGroup(system: SystemItem, from: string, to: string) {
+function renameApiGroup(system: SystemItem, from: string, to: string): boolean {
   const next = to.trim();
   if (!next) {
     notify("分组名不能为空");
-    return;
+    return false;
   }
   if (next === from) {
-    return;
+    return true;
   }
   ensureGroups(system);
   if (system.groups.includes(next)) {
     notify("已有这个分组");
-    return;
+    return false;
   }
   const index = system.groups.indexOf(from);
   if (index >= 0) {
@@ -2752,6 +2752,7 @@ function renameApiGroup(system: SystemItem, from: string, to: string) {
   }
   recordLog({ category: "update", action: "修改分组", system, detail: `${from} → ${next}` });
   scheduleSave();
+  return true;
 }
 
 async function removeGroup(system: SystemItem, name: string) {
@@ -2789,39 +2790,75 @@ function openGroupCreate() {
   render();
 }
 
-function bindGroupRename(input: HTMLInputElement, system: SystemItem, from: string) {
-  input.value = from;
-  input.spellcheck = false;
-  let done = false;
-  const finish = (save: boolean) => {
-    if (done) {
-      return;
-    }
-    done = true;
-    if (save) {
-      renameApiGroup(system, from, input.value);
-    }
-    render();
-  };
-  input.addEventListener("keydown", (event) => {
-    event.stopPropagation();
-    if (event.key === "Enter") {
-      event.preventDefault();
-      finish(true);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      finish(false);
-    }
-  });
-  input.addEventListener("blur", () => finish(true));
+let groupRenameTarget: { systemId: string; name: string } | null = null;
+
+function openGroupRename(system: SystemItem, name: string) {
+  groupRenameTarget = { systemId: system.id, name };
+  const dialog = document.querySelector("#group-rename") as HTMLElement;
+  const input = document.querySelector("#group-rename-input") as HTMLInputElement;
+  input.value = name;
+  dialog.hidden = false;
   input.focus();
   input.select();
 }
 
-function startGroupRename(row: HTMLElement, system: SystemItem, name: string) {
-  const input = el("input");
-  row.querySelector("button")?.replaceWith(input);
-  bindGroupRename(input, system, name);
+function closeGroupRename() {
+  groupRenameTarget = null;
+  (document.querySelector("#group-rename") as HTMLElement).hidden = true;
+}
+
+function submitGroupRename(event: Event) {
+  event.preventDefault();
+  const target = groupRenameTarget;
+  const input = document.querySelector("#group-rename-input") as HTMLInputElement;
+  const system = library.systems.find((item) => item.id === target?.systemId);
+  if (!system || !target) {
+    closeGroupRename();
+    return;
+  }
+  if (!renameApiGroup(system, target.name, input.value)) {
+    input.focus();
+    return;
+  }
+  closeGroupRename();
+  render();
+}
+
+function openGroupActionMenu(x: number, y: number, system: SystemItem, name: string) {
+  let menu = document.getElementById("group-menu");
+  if (!menu) {
+    menu = el("div", "pop");
+    menu.id = "group-menu";
+    document.body.append(menu);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+  }
+  menu.replaceChildren(
+    button("修改名称", "item", () => {
+      menu!.hidden = true;
+      openGroupRename(system, name);
+    }),
+    button("删除", "item danger", () => {
+      menu!.hidden = true;
+      void removeGroup(system, name);
+    }),
+  );
+  closePops(menu);
+  menu.hidden = false;
+  menu.style.position = "fixed";
+  menu.style.right = "auto";
+  menu.style.zIndex = "60";
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
+}
+
+function bindGroupMenu(row: HTMLElement, system: SystemItem, name: string) {
+  row.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openGroupActionMenu(event.clientX, event.clientY, system, name);
+  });
 }
 
 function groupCreateForm(system: SystemItem): HTMLFormElement {
@@ -3099,14 +3136,7 @@ function groupNavItem(filter: string | null, label: string, count: number, syste
   row.append(main);
   if (filter) {
     attachGroupDrag(row, system, filter);
-  }
-  if (filter) {
-    const actions = el("div", "group-nav-actions");
-    actions.append(
-      button("改名", "mini", () => startGroupRename(row, system, filter)),
-      button("删除", "mini danger", () => void removeGroup(system, filter)),
-    );
-    row.append(actions);
+    bindGroupMenu(row, system, filter);
   }
   return row;
 }
@@ -3199,12 +3229,7 @@ function apiGroupHeader(system: SystemItem, name: string, count: number, folded:
   row.append(title);
   if (name) {
     attachGroupDrag(row, system, name);
-    const actions = el("div", "api-group-actions");
-    actions.append(
-      button("改名", "mini", () => startGroupRename(row, system, name)),
-      button("删除", "mini danger", () => void removeGroup(system, name)),
-    );
-    row.append(actions);
+    bindGroupMenu(row, system, name);
   }
   return row;
 }
@@ -5312,6 +5337,20 @@ function init() {
     }
   });
   document.querySelector("#system-cancel")?.addEventListener("click", () => closeSystemDialog());
+  document.querySelector("#group-rename-form")?.addEventListener("submit", submitGroupRename);
+  document.querySelector("#group-rename-cancel")?.addEventListener("click", () => closeGroupRename());
+  const groupRename = document.querySelector("#group-rename") as HTMLElement;
+  groupRename.addEventListener("click", (event) => {
+    if (event.target === groupRename) {
+      closeGroupRename();
+    }
+  });
+  groupRename.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeGroupRename();
+    }
+  });
   document.querySelector("#path-form")?.addEventListener("submit", submitPath);
   document.querySelector("#path-cancel")?.addEventListener("click", () => closePathDialog());
   const pathDialog = document.querySelector("#path-dialog") as HTMLElement;

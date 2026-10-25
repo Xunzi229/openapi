@@ -85,8 +85,32 @@ fn append_log(app: tauri::AppHandle, entry: NewLog) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn query_logs(app: tauri::AppHandle, category: String, keyword: String) -> Result<Vec<model::LogEntry>, String> {
-    store::list_logs(&app, &category, &keyword)
+fn query_logs(
+    app: tauri::AppHandle,
+    category: String,
+    keyword: String,
+    system_id: String,
+    from_at: i64,
+    to_at: i64,
+) -> Result<Vec<model::LogEntry>, String> {
+    store::list_logs(&app, &category, &keyword, &system_id, from_at, to_at)
+}
+
+#[tauri::command]
+fn clear_logs(
+    app: tauri::AppHandle,
+    category: String,
+    keyword: String,
+    system_id: String,
+    from_at: i64,
+    to_at: i64,
+) -> Result<usize, String> {
+    store::purge_logs(&app, &category, &keyword, &system_id, from_at, to_at)
+}
+
+#[tauri::command]
+fn delete_related_logs(app: tauri::AppHandle, system_id: String, api_id: String) -> Result<(), String> {
+    store::remove_related_logs(&app, &system_id, &api_id)
 }
 
 fn build_menu(app: &tauri::App) -> tauri::Result<()> {
@@ -211,7 +235,9 @@ pub fn run() {
             backup_library,
             restore_library,
             append_log,
-            query_logs
+            query_logs,
+            clear_logs,
+            delete_related_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

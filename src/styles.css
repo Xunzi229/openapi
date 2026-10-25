@@ -3201,12 +3201,25 @@ button.domain-system {
 .log-tools {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
+}
+
+.log-scope {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.log-scope button:first-child {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .log-tools input {
   flex: 1;
-  min-width: 0;
+  min-width: 160px;
   height: 32px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -3214,6 +3227,25 @@ button.domain-system {
   background: var(--card);
   color: var(--fg);
   font-size: 13px;
+}
+
+.log-dates {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.log-dates input {
+  flex: none;
+  width: 142px;
+  min-width: 142px;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] .log-dates input {
+  color-scheme: dark;
 }
 
 .log-tools input:focus {

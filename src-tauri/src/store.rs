@@ -1,5 +1,6 @@
 use crate::import;
 use crate::model::{now_millis, ApiEntry, Case, Library, Link, LogEntry, NewLog, System, Variable};
+use rusqlite::types::Value;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -67,6 +68,8 @@ CREATE TABLE IF NOT EXISTS logs (
     result TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_logs_at ON logs(at DESC);
+CREATE INDEX IF NOT EXISTS idx_logs_system ON logs(system_id);
+CREATE INDEX IF NOT EXISTS idx_logs_api ON logs(api_id);
 CREATE INDEX IF NOT EXISTS idx_links_system ON links(system_id, position);
 CREATE INDEX IF NOT EXISTS idx_variables_system ON variables(system_id, position);
 CREATE INDEX IF NOT EXISTS idx_apis_system ON apis(system_id, position);
@@ -470,16 +473,27 @@ pub fn append_log(conn: &Connection, entry: &NewLog) -> Result<(), String> {
     Ok(())
 }
 
-pub fn query_logs(conn: &Connection, category: &str, keyword: &str) -> Result<Vec<LogEntry>, String> {
+fn log_clause(category: &str, keyword: &str, system_id: &str, from_at: i64, to_at: i64) -> (String, Vec<Value>) {
     let category = category.trim();
     let keyword = keyword.trim();
-    let mut sql = String::from(
-        "SELECT id, at, category, action, system_id, system_name, api_id, target, detail, result FROM logs WHERE 1 = 1",
-    );
-    let mut values: Vec<String> = Vec::new();
+    let system_id = system_id.trim();
+    let mut sql = String::from(" WHERE 1 = 1");
+    let mut values: Vec<Value> = Vec::new();
+    if !system_id.is_empty() {
+        sql.push_str(" AND system_id = ?");
+        values.push(Value::Text(system_id.to_string()));
+    }
     if !category.is_empty() {
         sql.push_str(" AND category = ?");
-        values.push(category.to_string());
+        values.push(Value::Text(category.to_string()));
+    }
+    if from_at > 0 {
+        sql.push_str(" AND at >= ?");
+        values.push(Value::Integer(from_at));
+    }
+    if to_at > 0 {
+        sql.push_str(" AND at <= ?");
+        values.push(Value::Integer(to_at));
     }
     if !keyword.is_empty() {
         sql.push_str(
@@ -487,10 +501,24 @@ pub fn query_logs(conn: &Connection, category: &str, keyword: &str) -> Result<Ve
         );
         let pattern = like_pattern(keyword);
         for _ in 0..5 {
-            values.push(pattern.clone());
+            values.push(Value::Text(pattern.clone()));
         }
     }
-    sql.push_str(" ORDER BY id DESC LIMIT 200");
+    (sql, values)
+}
+
+pub fn query_logs(
+    conn: &Connection,
+    category: &str,
+    keyword: &str,
+    system_id: &str,
+    from_at: i64,
+    to_at: i64,
+) -> Result<Vec<LogEntry>, String> {
+    let (clause, values) = log_clause(category, keyword, system_id, from_at, to_at);
+    let sql = format!(
+        "SELECT id, at, category, action, system_id, system_name, api_id, target, detail, result FROM logs{clause} ORDER BY id DESC LIMIT 200"
+    );
     let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(values.iter()), |row| {
@@ -511,6 +539,30 @@ pub fn query_logs(conn: &Connection, category: &str, keyword: &str) -> Result<Ve
     rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
 }
 
+pub fn clear_logs(
+    conn: &Connection,
+    category: &str,
+    keyword: &str,
+    system_id: &str,
+    from_at: i64,
+    to_at: i64,
+) -> Result<usize, String> {
+    let (clause, values) = log_clause(category, keyword, system_id, from_at, to_at);
+    conn.execute(&format!("DELETE FROM logs{clause}"), rusqlite::params_from_iter(values.iter()))
+        .map_err(|error| error.to_string())
+}
+
+pub fn delete_related_logs(conn: &Connection, system_id: &str, api_id: &str) -> Result<(), String> {
+    let api_id = api_id.trim();
+    let system_id = system_id.trim();
+    if !api_id.is_empty() {
+        conn.execute("DELETE FROM logs WHERE api_id = ?1", [api_id]).map_err(|error| error.to_string())?;
+    } else if !system_id.is_empty() {
+        conn.execute("DELETE FROM logs WHERE system_id = ?1", [system_id]).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn add_log(app: &AppHandle, entry: &NewLog) -> Result<(), String> {
     let _guard = GUARD.lock().map_err(|error| error.to_string())?;
     let dir = data_dir(app)?;
@@ -518,11 +570,39 @@ pub fn add_log(app: &AppHandle, entry: &NewLog) -> Result<(), String> {
     append_log(&conn, entry)
 }
 
-pub fn list_logs(app: &AppHandle, category: &str, keyword: &str) -> Result<Vec<LogEntry>, String> {
+pub fn list_logs(
+    app: &AppHandle,
+    category: &str,
+    keyword: &str,
+    system_id: &str,
+    from_at: i64,
+    to_at: i64,
+) -> Result<Vec<LogEntry>, String> {
     let _guard = GUARD.lock().map_err(|error| error.to_string())?;
     let dir = data_dir(app)?;
     let conn = connect(&dir.join("library.db"))?;
-    query_logs(&conn, category, keyword)
+    query_logs(&conn, category, keyword, system_id, from_at, to_at)
+}
+
+pub fn purge_logs(
+    app: &AppHandle,
+    category: &str,
+    keyword: &str,
+    system_id: &str,
+    from_at: i64,
+    to_at: i64,
+) -> Result<usize, String> {
+    let _guard = GUARD.lock().map_err(|error| error.to_string())?;
+    let dir = data_dir(app)?;
+    let conn = connect(&dir.join("library.db"))?;
+    clear_logs(&conn, category, keyword, system_id, from_at, to_at)
+}
+
+pub fn remove_related_logs(app: &AppHandle, system_id: &str, api_id: &str) -> Result<(), String> {
+    let _guard = GUARD.lock().map_err(|error| error.to_string())?;
+    let dir = data_dir(app)?;
+    let conn = connect(&dir.join("library.db"))?;
+    delete_related_logs(&conn, system_id, api_id)
 }
 
 pub fn restore_from(app: &AppHandle, source: &Path) -> Result<Library, String> {
@@ -688,10 +768,34 @@ mod tests {
         )
         .unwrap();
         write_library(&conn, &sample()).unwrap();
-        let rows = query_logs(&conn, "run", "GET /a").unwrap();
+        let rows = query_logs(&conn, "run", "GET /a", "", 0, 0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].result, "ok");
-        assert!(query_logs(&conn, "create", "").unwrap().is_empty());
+        assert!(query_logs(&conn, "create", "", "", 0, 0).unwrap().is_empty());
+        assert_eq!(query_logs(&conn, "", "", "s1", 0, 0).unwrap().len(), 1);
+        assert!(query_logs(&conn, "", "", "missing", 0, 0).unwrap().is_empty());
+        conn.execute("UPDATE logs SET at = 1000", ()).unwrap();
+        assert_eq!(query_logs(&conn, "", "", "", 500, 1500).unwrap().len(), 1);
+        assert!(query_logs(&conn, "", "", "", 5000, 9000).unwrap().is_empty());
+        append_log(
+            &conn,
+            &NewLog {
+                category: "update".to_string(),
+                action: "修改接口".to_string(),
+                system_id: "s2".to_string(),
+                system_name: "other".to_string(),
+                api_id: "a2".to_string(),
+                target: "GET /b".to_string(),
+                detail: String::new(),
+                result: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(clear_logs(&conn, "", "", "s1", 0, 0).unwrap(), 1);
+        assert!(query_logs(&conn, "", "", "s1", 0, 0).unwrap().is_empty());
+        assert_eq!(query_logs(&conn, "", "", "s2", 0, 0).unwrap().len(), 1);
+        delete_related_logs(&conn, "", "a2").unwrap();
+        assert!(query_logs(&conn, "", "", "", 0, 0).unwrap().is_empty());
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
     }

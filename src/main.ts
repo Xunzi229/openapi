@@ -9,6 +9,8 @@ import {
   importMarkdown,
   importYapi,
   appendLog,
+  clearLogs,
+  deleteRelatedLogs,
   loadLibrary,
   onMenu,
   openDataDir,
@@ -68,6 +70,9 @@ let domainView = "";
 let logView = false;
 let logCategory = "";
 let logKeyword = "";
+let logSystemId = "";
+let logFrom = "";
+let logTo = "";
 let logRows: LogEntry[] = [];
 let logOpenId = 0;
 let logLoading = false;
@@ -1400,7 +1405,8 @@ function onSearchKey(event: KeyboardEvent) {
 
 function renderCrumb(system: SystemItem | undefined) {
   if (logView) {
-    crumbDomain.textContent = "";
+    const scoped = library.systems.find((item) => item.id === logSystemId);
+    crumbDomain.textContent = scoped?.name ?? "";
     crumbName.textContent = "日志";
     crumbCount.textContent = logRows.length ? `最近 ${logRows.length} 条` : "";
     return;
@@ -1720,10 +1726,27 @@ function logTime(at: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function logBound(value: string, end: boolean): number {
+  if (!value) {
+    return 0;
+  }
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) {
+    return 0;
+  }
+  if (end) {
+    return new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
+  }
+  return new Date(year, month - 1, day).getTime();
+}
+
 function showLogs() {
   logView = true;
   domainView = "";
   configOpen = false;
+  logSystemId = selectedSystem()?.id ?? "";
+  logOpenId = 0;
+  logRows = [];
   logLoading = true;
   render();
   void loadLogs();
@@ -1733,7 +1756,7 @@ async function loadLogs() {
   const seq = ++logSeq;
   logLoading = true;
   try {
-    const rows = await queryLogs(logCategory, logKeyword);
+    const rows = await queryLogs(logCategory, logKeyword, logSystemId, logBound(logFrom, false), logBound(logTo, true));
     if (seq !== logSeq || !logView) {
       return;
     }
@@ -1770,7 +1793,14 @@ function openLoggedApi(row: LogEntry) {
 function paintLogList(list: HTMLElement) {
   list.replaceChildren();
   if (logRows.length === 0) {
-    list.append(el("p", "filter-empty", logLoading ? "正在读取" : logKeyword || logCategory ? "没有匹配的日志" : "还没有日志"));
+    const empty = logLoading
+      ? "正在读取"
+      : logKeyword || logCategory || logFrom || logTo
+        ? "没有匹配的日志"
+        : logSystemId
+          ? "这个系统还没有日志"
+          : "还没有日志";
+    list.append(el("p", "filter-empty", empty));
     return;
   }
   for (const row of logRows) {
@@ -1812,6 +1842,29 @@ function paintLogList(list: HTMLElement) {
 function renderLogPage(): HTMLElement {
   const page = el("section", "log-page");
   const tools = el("div", "log-tools");
+  const current = selectedSystem();
+  if (current) {
+    const scope = el("div", "method-filter log-scope");
+    const pickScope = (systemId: string) => {
+      if (logSystemId === systemId) {
+        return;
+      }
+      logSystemId = systemId;
+      logOpenId = 0;
+      logRows = [];
+      logLoading = true;
+      scope.querySelectorAll("button").forEach((item, index) => {
+        item.classList.toggle("on", systemId ? index === 0 : index === 1);
+      });
+      paintLogList(list);
+      renderCrumb(undefined);
+      void loadLogs();
+    };
+    const mine = button(current.name || "未命名", logSystemId === current.id ? "on" : "", () => pickScope(current.id));
+    mine.title = current.name || "未命名";
+    scope.append(mine, button("全部", logSystemId === "" ? "on" : "", () => pickScope("")));
+    tools.append(scope);
+  }
   const filters = el("div", "method-filter");
   for (const [value, label] of LOG_CATEGORIES) {
     const node = button(label, logCategory === value ? "on" : "", () => {
@@ -1839,7 +1892,46 @@ function renderLogPage(): HTMLElement {
       void loadLogs();
     }, 200);
   });
-  tools.append(filters, input);
+  const dates = el("div", "log-dates");
+  const from = el("input", "log-date");
+  from.type = "date";
+  from.value = logFrom;
+  from.title = "开始日期";
+  const to = el("input", "log-date");
+  to.type = "date";
+  to.value = logTo;
+  to.title = "结束日期";
+  const applyDate = () => {
+    logFrom = from.value;
+    logTo = to.value;
+    logOpenId = 0;
+    logRows = [];
+    logLoading = true;
+    paintLogList(list);
+    renderCrumb(undefined);
+    void loadLogs();
+  };
+  from.addEventListener("change", applyDate);
+  to.addEventListener("change", applyDate);
+  dates.append(from, el("span", "", "至"), to);
+  const clear = button("清空", "danger", () => {
+    const filtered = Boolean(logSystemId || logCategory || logKeyword || logFrom || logTo);
+    void confirmDelete(filtered ? "清空当前筛选出的日志？" : "清空全部日志？").then((ok) => {
+      if (!ok) {
+        return;
+      }
+      void clearLogs(logCategory, logKeyword, logSystemId, logBound(logFrom, false), logBound(logTo, true))
+        .then((count) => {
+          logOpenId = 0;
+          logRows = [];
+          notify(`已清空 ${count} 条`);
+          renderCrumb(undefined);
+          void loadLogs();
+        })
+        .catch((error) => notify(`清空失败：${String(error)}`, true));
+    });
+  });
+  tools.append(filters, dates, input, clear);
   const list = el("div", "log-list");
   list.id = "log-list";
   paintLogList(list);
@@ -1942,11 +2034,15 @@ function renderSystemHead(system: SystemItem): HTMLElement {
       if (!ok) {
         return;
       }
-      recordLog({ category: "delete", action: "删除系统", system, detail: system.name || "未命名" });
-      library.systems = library.systems.filter((item) => item.id !== system.id);
-      selectSystem("");
-      scheduleSave();
-      render();
+      void deleteRelatedLogs(system.id, "")
+        .catch(() => notify("对应日志没有删掉", true))
+        .then(() => {
+          recordLog({ category: "delete", action: "删除系统", system, detail: system.name || "未命名" });
+          library.systems = library.systems.filter((item) => item.id !== system.id);
+          selectSystem("");
+          scheduleSave();
+          render();
+        });
     });
   });
   pop.append(yapiItem, exportItem, remove);
@@ -3469,23 +3565,27 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
           if (!ok) {
             return;
           }
-          for (const item of api.cases) {
-            if (!target.cases.some((existing) => existing.content === item.content)) {
-              target.cases.push(item);
-            }
-          }
-          touchApi(target);
-          recordLog({
-            category: "update",
-            action: "合并接口",
-            system,
-            api: target,
-            detail: `并入 ${api.method} ${api.path} 的 ${api.cases.length} 条用例`,
-          });
-          system.apis = system.apis.filter((item) => item.id !== api.id);
-          showApi(target.id);
-          scheduleSave();
-          render();
+          void deleteRelatedLogs("", api.id)
+            .catch(() => notify("对应日志没有删掉", true))
+            .then(() => {
+              for (const item of api.cases) {
+                if (!target.cases.some((existing) => existing.content === item.content)) {
+                  target.cases.push(item);
+                }
+              }
+              touchApi(target);
+              recordLog({
+                category: "update",
+                action: "合并接口",
+                system,
+                api: target,
+                detail: `并入 ${api.method} ${api.path} 的 ${api.cases.length} 条用例`,
+              });
+              system.apis = system.apis.filter((item) => item.id !== api.id);
+              showApi(target.id);
+              scheduleSave();
+              render();
+            });
         });
       }, `与 ${target.method} ${target.path} 只差大小写或末尾斜杠`),
     );
@@ -3502,10 +3602,14 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
         if (!ok) {
           return;
         }
-        recordLog({ category: "delete", action: "删除接口", system, api, detail: `${api.cases.length} 条用例` });
-        system.apis = system.apis.filter((item) => item.id !== api.id);
-        scheduleSave();
-        render();
+        void deleteRelatedLogs("", api.id)
+          .catch(() => notify("对应日志没有删掉", true))
+          .then(() => {
+            recordLog({ category: "delete", action: "删除接口", system, api, detail: `${api.cases.length} 条用例` });
+            system.apis = system.apis.filter((item) => item.id !== api.id);
+            scheduleSave();
+            render();
+          });
       });
     }),
   );

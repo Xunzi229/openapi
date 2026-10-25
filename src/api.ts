@@ -68,8 +68,16 @@ export function appendLog(entry: NewLog): Promise<void> {
   return invoke("append_log", { entry });
 }
 
-export function queryLogs(category: string, keyword: string): Promise<LogEntry[]> {
-  return invoke("query_logs", { category, keyword });
+export function queryLogs(category: string, keyword: string, systemId: string, fromAt: number, toAt: number): Promise<LogEntry[]> {
+  return invoke("query_logs", { category, keyword, systemId, fromAt, toAt });
+}
+
+export function clearLogs(category: string, keyword: string, systemId: string, fromAt: number, toAt: number): Promise<number> {
+  return invoke("clear_logs", { category, keyword, systemId, fromAt, toAt });
+}
+
+export function deleteRelatedLogs(systemId: string, apiId: string): Promise<void> {
+  return invoke("delete_related_logs", { systemId, apiId });
 }
 
 export function onMenu(handler: (id: string) => void): void {

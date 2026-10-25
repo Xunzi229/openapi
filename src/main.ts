@@ -200,6 +200,14 @@ function touchApi(api: ApiItem) {
   api.updatedAt = Date.now();
 }
 
+function sameText(left: string, right: string): boolean {
+  return left.replace(/\r\n/g, "\n") === right.replace(/\r\n/g, "\n");
+}
+
+function caseChange(before: string, after: string): string {
+  return `修改前:\n${before}\n\n修改后:\n${after}`;
+}
+
 function touchCase(api: ApiItem, item: CaseItem) {
   item.updatedAt = Date.now();
   touchApi(api);
@@ -3242,7 +3250,8 @@ function groupButton(system: SystemItem, api: ApiItem): HTMLElement {
   ensureGroups(system);
   const assign = (name: string) => {
     const next = name.trim();
-    if (groupName(api) === next) {
+    const previous = groupName(api);
+    if (previous === next) {
       pop.hidden = true;
       return;
     }
@@ -3251,7 +3260,13 @@ function groupButton(system: SystemItem, api: ApiItem): HTMLElement {
     }
     api.group = next;
     touchApi(api);
-    recordLog({ category: "update", action: "修改分组", system, api, detail: next || "未分组" });
+    recordLog({
+      category: "update",
+      action: "修改分组",
+      system,
+      api,
+      detail: `${previous || "未分组"} → ${next || "未分组"}`,
+    });
     scheduleSave();
     render();
   };
@@ -3518,7 +3533,13 @@ function renderApi(system: SystemItem, api: ApiItem): HTMLElement {
     });
     note.addEventListener("blur", () => {
       if (note.value !== noteBefore) {
-        recordLog({ category: "update", action: "修改备注", system, api, detail: note.value.trim() || "已清空" });
+        recordLog({
+          category: "update",
+          action: "修改备注",
+          system,
+          api,
+          detail: `${noteBefore.trim() || "（空）"} → ${note.value.trim() || "（空）"}`,
+        });
       }
     });
     note.addEventListener("keydown", (event) => {
@@ -3759,7 +3780,7 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
       formatBackup.set(item.id, item.content);
       item.content = formatted;
     }
-    if (item.content !== before) {
+    if (!sameText(item.content, before)) {
       skipCaseLog.add(item.id);
       recordLog({
         category: "update",
@@ -3767,6 +3788,7 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
         system,
         api,
         detail: `${formatting ? "格式化" : "还原"} · ${caseTitle(item.content, index)}`,
+        result: caseChange(before, item.content),
       });
     }
     touchCase(api, item);
@@ -3797,7 +3819,14 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
       if (!ok) {
         return;
       }
-      recordLog({ category: "delete", action: "删除用例", system, api, detail: caseTitle(item.content, index) });
+      recordLog({
+        category: "delete",
+        action: "删除用例",
+        system,
+        api,
+        detail: caseTitle(item.content, index),
+        result: item.content,
+      });
       api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
       touchApi(api);
       scheduleSave();
@@ -3831,6 +3860,8 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
   area.dataset.case = item.id;
   area.spellcheck = false;
   area.value = item.content;
+  let caseSnapshot = area.value;
+  let caseEdited = false;
   const syncRunButtons = () => {
     const commands = curlCommands(area.value);
     const count = Math.max(commands.length, 1);
@@ -3882,11 +3913,13 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
     placeRunButtons();
     requestAnimationFrame(placeRunButtons);
   };
-  let caseSnapshot = item.content;
   area.addEventListener("focus", () => {
-    caseSnapshot = area.value;
+    if (!caseEdited) {
+      caseSnapshot = area.value;
+    }
   });
   area.addEventListener("input", () => {
+    caseEdited = true;
     item.content = area.value;
     formatBackup.delete(item.id);
     format.textContent = "格式化";
@@ -3950,29 +3983,41 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
         return;
       }
       if (!next.trim()) {
-        if (previous.trim()) {
-          recordLog({ category: "delete", action: "删除用例", system, api, detail: caseTitle(previous, index) });
+        if (caseEdited && previous.trim()) {
+          recordLog({
+            category: "delete",
+            action: "删除用例",
+            system,
+            api,
+            detail: caseTitle(previous, index),
+            result: previous,
+          });
         }
-        const focusId = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.case ?? "" : "";
-        api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
-        touchApi(api);
-        scheduleSave();
-        renderDetail();
-        if (focusId) {
-          focusCase(focusId);
+        if (!previous.trim() || caseEdited) {
+          const focusId = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.case ?? "" : "";
+          api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
+          touchApi(api);
+          scheduleSave();
+          renderDetail();
+          if (focusId) {
+            focusCase(focusId);
+          }
         }
         return;
       }
-      if (next !== previous) {
-        recordLog({
-          category: previous.trim() ? "update" : "create",
-          action: previous.trim() ? "修改用例" : "新增用例",
-          system,
-          api,
-          detail: caseTitle(next, index),
-        });
-        caseSnapshot = next;
+      if (!caseEdited || sameText(previous, next)) {
+        return;
       }
+      recordLog({
+        category: previous.trim() ? "update" : "create",
+        action: previous.trim() ? "修改用例" : "新增用例",
+        system,
+        api,
+        detail: caseTitle(next, index),
+        result: previous.trim() ? caseChange(previous, next) : next,
+      });
+      caseSnapshot = next;
+      caseEdited = false;
     }, 150);
   });
 

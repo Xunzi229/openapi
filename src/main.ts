@@ -2,6 +2,7 @@ import {
   backupLibrary,
   confirmAction,
   confirmDelete,
+  confirmForm,
   copyText,
   dataDirPath,
   exportSystemMarkdown,
@@ -36,6 +37,8 @@ import {
   fuzzyScore,
   hasTitle,
   highlightShell,
+  enclosingVariable,
+  variableOverlap,
   hostOf,
   hostsIn,
   normalizeHost,
@@ -43,13 +46,15 @@ import {
   parseStructure,
   pathOf,
   replaceCurlPath,
+  renameVariable,
+  replaceTextWithVariable,
   substitute,
   swapHost,
   type Query,
 } from "./curl";
+import { listFns, parseCall, runCall } from "./fns";
 import type { ApiItem, CaseItem, Library, LinkItem, LogEntry, RunResult, SystemItem, VariableItem } from "./types";
 
-const DOMAIN_ORDER = ["计划", "供应链", "采购", "风控", "商品", "PMS", "实验", "算法", "集成测试", "其他"];
 const DEFAULT_CURL_BG = "#17211d";
 const DEFAULT_FONT_SIZE = 16;
 const RECENT_LIMIT = 5;
@@ -308,18 +313,34 @@ function selectedSystem(): SystemItem | undefined {
 /* 搜索 */
 
 function domainOrder(): string[] {
-  const saved = readList("domain-order");
-  return saved.length > 0 ? saved : [...DOMAIN_ORDER];
+  return readList("domain-order");
+}
+
+function readDomainCatalog(): string[] {
+  return readList("domain-catalog");
+}
+
+function rememberDomain(domain: string) {
+  const next = domain.trim();
+  if (!next || next === "其他" || next === "最近" || next === "收藏") {
+    return;
+  }
+  const catalog = readDomainCatalog();
+  if (catalog.includes(next)) {
+    return;
+  }
+  catalog.push(next);
+  writeList("domain-catalog", catalog);
+}
+
+function forgetDomain(domain: string) {
+  writeList("domain-catalog", readDomainCatalog().filter((item) => item !== domain));
 }
 
 function rank(domain: string): number {
   const order = domainOrder();
   const index = order.indexOf(domain);
-  if (index !== -1) {
-    return index;
-  }
-  const preset = DOMAIN_ORDER.indexOf(domain);
-  return preset === -1 ? order.length + 1 : preset;
+  return index === -1 ? order.length + 1 : index;
 }
 
 function renameDomain(from: string, to: string) {
@@ -337,6 +358,8 @@ function renameDomain(from: string, to: string) {
   if (count === 0) {
     return;
   }
+  forgetDomain(from);
+  rememberDomain(next);
   const collapsed = readCollapsed();
   if (collapsed.delete(from)) {
     collapsed.add(next);
@@ -364,30 +387,35 @@ async function deleteDomain(domain: string) {
     return;
   }
   const members = library.systems.filter((system) => (system.domain || "其他") === domain);
-  const ok = await confirmDelete(`删除业务域「${domain}」？其中 ${members.length} 个系统会归到「其他」，系统不会删。`);
-  if (!ok) {
-    return;
+  if (members.length > 0) {
+    const ok = await confirmDelete(`删除业务域「${domain}」？其中 ${members.length} 个系统会归到「其他」，系统不会删。`);
+    if (!ok) {
+      return;
+    }
+    for (const system of members) {
+      system.domain = "其他";
+    }
+    scheduleSave();
   }
-  for (const system of members) {
-    system.domain = "其他";
-  }
+  forgetDomain(domain);
   const collapsed = readCollapsed();
-  collapsed.delete(domain);
-  writeList("collapsed-domains", [...collapsed]);
+  if (collapsed.delete(domain)) {
+    writeList("collapsed-domains", [...collapsed]);
+  }
   const order = domainOrder();
   const index = order.indexOf(domain);
   if (index >= 0) {
     order.splice(index, 1);
+    writeList("domain-order", order);
   }
-  if (!order.includes("其他")) {
-    order.push("其他");
-  }
-  writeList("domain-order", order);
   if (domainView === domain) {
-    domainView = "其他";
+    domainView = members.length > 0 ? "其他" : "";
   }
-  scheduleSave();
+  if (pickedDomain === domain) {
+    pickedDomain = "";
+  }
   render();
+  paintDomainPicks();
 }
 
 function searching(): boolean {
@@ -451,7 +479,13 @@ function orderedSystems(systems: SystemItem[]): SystemItem[] {
 }
 
 function sortedApis(system: SystemItem): ApiItem[] {
-  return [...system.apis].sort((left, right) => Number(right.starred) - Number(left.starred));
+  return [...system.apis].sort((left, right) => {
+    const path = left.path.localeCompare(right.path, "en", { sensitivity: "base", numeric: true });
+    if (path !== 0) {
+      return path;
+    }
+    return left.method.localeCompare(right.method, "en", { sensitivity: "base" });
+  });
 }
 
 function visibleApis(system: SystemItem): ApiItem[] {
@@ -485,9 +519,20 @@ function syncSelection() {
 }
 
 function knownDomains(): string[] {
-  const extras = [...new Set(library.systems.map((system) => (system.domain || "其他").trim()).filter((domain) => domain && !DOMAIN_ORDER.includes(domain)))];
-  extras.sort((left, right) => left.localeCompare(right, "zh"));
-  return [...DOMAIN_ORDER, ...extras];
+  const names = new Set<string>();
+  for (const domain of readDomainCatalog()) {
+    const trimmed = domain.trim();
+    if (trimmed) {
+      names.add(trimmed);
+    }
+  }
+  for (const system of library.systems) {
+    const domain = (system.domain || "").trim();
+    if (domain) {
+      names.add(domain);
+    }
+  }
+  return [...names].sort((left, right) => rank(left) - rank(right) || left.localeCompare(right, "zh"));
 }
 
 let pickedDomain = "";
@@ -496,13 +541,22 @@ function paintDomainPicks() {
   const box = document.querySelector("#domain-picks") as HTMLElement;
   box.replaceChildren();
   for (const domain of knownDomains()) {
-    box.append(
-      button(domain, pickedDomain === domain ? "on" : "", () => {
+    const chip = el("span", pickedDomain === domain ? "pick on" : "pick");
+    chip.append(
+      button(domain, "pick-name", () => {
         pickedDomain = pickedDomain === domain ? "" : domain;
         (document.querySelector("#system-form input[name=domain]") as HTMLInputElement).value = "";
         paintDomainPicks();
       }),
     );
+    if (domain !== "其他") {
+      chip.append(
+        button("-", "pick-remove", () => {
+          void deleteDomain(domain);
+        }, "移除"),
+      );
+    }
+    box.append(chip);
   }
 }
 
@@ -527,6 +581,7 @@ function submitSystem(form: HTMLFormElement) {
     return;
   }
   const typed = String(data.get("domain") ?? "").trim();
+  const domain = typed || pickedDomain || "其他";
   query = parseQuery("");
   search.value = "";
   resetOpenState();
@@ -538,10 +593,11 @@ function submitSystem(form: HTMLFormElement) {
     render();
     return;
   }
+  rememberDomain(domain);
   const system: SystemItem = {
     id: uid(),
     name,
-    domain: typed || pickedDomain || domainOf(name),
+    domain,
     note: "",
     groups: [],
     color: "",
@@ -555,23 +611,6 @@ function submitSystem(form: HTMLFormElement) {
   recordLog({ category: "create", action: "新增系统", system });
   scheduleSave();
   render();
-}
-
-function domainOf(name: string): string {
-  if (name.includes("集成测试")) {
-    return "集成测试";
-  }
-  const rules: Array<[boolean, string]> = [
-    [name.startsWith("plan-"), "计划"],
-    [name.startsWith("scm-"), "供应链"],
-    [name.startsWith("ddmc-") || name === "greatwall", "采购"],
-    [name.startsWith("risk-control"), "风控"],
-    [name.startsWith("sku-"), "商品"],
-    [name.startsWith("pms-"), "PMS"],
-    [name.startsWith("abtest"), "实验"],
-    [name.startsWith("algo-"), "算法"],
-  ];
-  return rules.find(([hit]) => hit)?.[1] ?? "其他";
 }
 
 /* 展开状态 */
@@ -1197,6 +1236,7 @@ function openDomainMenu(anchor: HTMLElement, system: SystemItem) {
           return;
         }
         system.domain = domain;
+        rememberDomain(domain);
         scheduleSave();
         render();
       }),
@@ -2604,11 +2644,21 @@ function renderVariableRow(system: SystemItem, variable: VariableItem): HTMLElem
   const row = el("div", "row-item");
   row.dataset.row = variable.id;
   row.append(el("span", "handle", "⋮⋮"));
-  row.append(el("b", "", `{{${variable.name}}}`));
-  const shown = variable.secret && !revealed.has(variable.id) ? "••••••••" : variable.value;
+  const nameLabel = el("b", "", `{{${variable.name}}}`);
+  bindVarPreview(nameLabel, system, variable.name);
+  row.append(nameLabel);
+  const masked = variable.secret && !revealed.has(variable.id);
+  const rendered = runCall(variable.value);
+  const shown = masked ? "••••••••" : variable.value;
   const value = el("code", "", shown);
-  value.title = variable.secret ? "" : variable.value;
+  bindVarPreview(value, system, variable.name);
+  value.title = masked ? "" : variable.value;
   row.append(value);
+  if (rendered && !masked) {
+    const live = el("span", "note-text", rendered);
+    live.title = "当前结果";
+    row.append(live);
+  }
   const uses = system.apis.reduce((sum, api) => sum + api.cases.filter((item) => item.content.includes(`{{${variable.name}}}`)).length, 0);
   if (uses > 0) {
     const usage = el("span", "note-text", String(uses));
@@ -2629,7 +2679,7 @@ function renderVariableRow(system: SystemItem, variable: VariableItem): HTMLElem
     );
   }
   actions.append(
-    button("复制值", "ghost", () => void copyText(variable.value).then(() => notify("已复制"))),
+    button("复制值", "ghost", () => void copyText(rendered ?? variable.value).then(() => notify("已复制"))),
     button("编辑", "ghost", () => {
       editingRow = variable.id;
       renderDetail();
@@ -2664,7 +2714,7 @@ function renderVariableEditor(system: SystemItem, variable: VariableItem, isNew 
   name.placeholder = "名称，如 token";
   name.value = variable.name;
   const value = el("input");
-  value.placeholder = "值";
+  value.placeholder = "值，函数写成 $now:yyyy-MM-dd";
   value.value = variable.value;
   let scopeValue = system.links.some((link) => link.id === variable.envId) ? variable.envId : "";
   const scope = menuField(
@@ -2692,7 +2742,79 @@ function renderVariableEditor(system: SystemItem, variable: VariableItem, isNew 
       renderDetail();
     }),
   );
-  row.append(name, value, scope, secretLabel, actions);
+  const fnLine = el("div", "fn-line");
+  const arg = el("input");
+  arg.className = "fn-arg";
+  const chips = el("span", "fn-chips");
+  const preview = el("span", "fn-preview");
+  let picked = parseCall(value.value)?.name ?? "";
+  const paintFn = () => {
+    const fn = listFns().find((item) => item.name === picked);
+    arg.hidden = !fn;
+    chips.hidden = !fn;
+    preview.hidden = !fn;
+    if (!fn) {
+      preview.textContent = "";
+      chips.replaceChildren();
+      return;
+    }
+    arg.placeholder = fn.hint;
+    chips.replaceChildren(
+      ...fn.presets.map((preset) =>
+        button(preset.label, arg.value === preset.arg ? "fn-chip on" : "fn-chip", () => {
+          arg.value = preset.arg;
+          value.value = preset.arg ? `$${fn.name}:${preset.arg}` : `$${fn.name}`;
+          paintFn();
+        }),
+      ),
+    );
+    preview.textContent = runCall(value.value) ?? "";
+  };
+  const fnMenu = menuField(
+    [{ value: "", label: "文本" }, ...listFns().map((fn) => ({ value: fn.name, label: fn.label }))],
+    picked,
+    (next) => {
+      picked = next;
+      if (!next) {
+        if (parseCall(value.value)) {
+          value.value = "";
+        }
+        paintFn();
+        return;
+      }
+      const call = parseCall(value.value);
+      if (call?.name === next) {
+        arg.value = call.arg;
+      } else {
+        const preset = listFns().find((fn) => fn.name === next)?.presets[0]?.arg ?? "";
+        arg.value = preset;
+        value.value = preset ? `$${next}:${preset}` : `$${next}`;
+      }
+      paintFn();
+    },
+  );
+  arg.addEventListener("input", () => {
+    if (!picked) {
+      return;
+    }
+    value.value = arg.value ? `$${picked}:${arg.value}` : `$${picked}`;
+    paintFn();
+  });
+  value.addEventListener("input", () => {
+    const call = parseCall(value.value);
+    picked = call?.name ?? "";
+    fnMenu.setValue(picked);
+    if (call) {
+      arg.value = call.arg;
+    }
+    paintFn();
+  });
+  if (picked) {
+    arg.value = parseCall(value.value)?.arg ?? "";
+  }
+  paintFn();
+  fnLine.append(el("span", "fn-label", "函数"), fnMenu, arg, chips, preview);
+  row.append(name, value, scope, secretLabel, actions, fnLine);
   row.addEventListener("submit", (event) => {
     event.preventDefault();
     const nextName = name.value.trim().replace(/[^A-Za-z0-9_.-]/g, "");
@@ -2731,45 +2853,316 @@ function definedVariables(system: SystemItem): Set<string> {
   return new Set(variablesFor(system).map((item) => item.name));
 }
 
-function makeVariable(system: SystemItem, selected: string, name: string) {
+function clipText(text: string, max = 24): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+function variableInScope(system: SystemItem, name: string, envId: string): VariableItem | undefined {
+  const lower = name.toLowerCase();
+  return system.variables.find((item) => (item.envId || "") === envId && item.name.toLowerCase() === lower);
+}
+
+let varPreview: HTMLElement | null = null;
+let varPreviewKey = "";
+let varPreviewAnchor: HTMLElement | null = null;
+let varPreviewShow = 0;
+let varPreviewHide = 0;
+
+function valuesByEnv(system: SystemItem, name: string) {
+  const global = variableInScope(system, name, "");
+  const scopes = [
+    { id: "", label: "全局" },
+    ...system.links.filter((link) => link.kind === "env").map((link) => ({ id: link.id, label: link.label || "未命名" })),
+  ];
+  return scopes.map((scope) => {
+    const own = variableInScope(system, name, scope.id);
+    const source = own ?? (scope.id ? global : undefined);
+    return {
+      label: scope.label,
+      envId: scope.id,
+      value: source ? source.value : null,
+      mask: Boolean(source?.secret) && !revealed.has(source?.id ?? ""),
+      inherited: Boolean(scope.id && !own && source),
+    };
+  });
+}
+
+function placeVarPreview(box: HTMLElement, anchor: HTMLElement) {
+  const rect = anchor.getBoundingClientRect();
+  const margin = 8;
+  const width = box.offsetWidth;
+  const height = box.offsetHeight;
+  let left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - margin) {
+    top = Math.max(margin, rect.top - height - 6);
+  }
+  box.style.left = `${left}px`;
+  box.style.top = `${top}px`;
+}
+
+function paintVarPreview(system: SystemItem, name: string, anchor: HTMLElement) {
+  const box = varPreview ?? el("div", "var-preview");
+  if (!varPreview) {
+    varPreview = box;
+    box.addEventListener("mouseenter", () => window.clearTimeout(varPreviewHide));
+    box.addEventListener("mouseleave", () => scheduleHideVarPreview());
+    box.addEventListener("mousedown", (event) => {
+      if (event.target instanceof Element && event.target.closest("button")) {
+        return;
+      }
+      event.preventDefault();
+    });
+    document.body.append(box);
+  }
+  const current = currentEnvId(system);
+  const inline = runCall(name);
+  box.replaceChildren(el("div", "title", `{{${name}}}`));
+  if (inline !== null) {
+    const row = el("div", "row on");
+    row.append(el("span", "label", "结果"));
+    const value = el("span", "value");
+    value.append(el("code", "", inline));
+    row.append(value, button("复制", "copy", () => void copyText(inline).then(() => notify("已复制"))));
+    box.append(row);
+    box.hidden = false;
+    placeVarPreview(box, anchor);
+    return;
+  }
+  for (const scope of valuesByEnv(system, name)) {
+    const row = el("div", scope.envId === current ? "row on" : "row");
+    row.append(el("span", "label", scope.label));
+    const value = el("span", "value");
+    const missing = scope.value === null;
+    const blank = scope.value === "";
+    const live = !missing && !scope.mask ? runCall(scope.value ?? "") : null;
+    const text = missing ? "未设置" : scope.mask ? "••••••••" : blank ? "（空）" : (live ?? scope.value ?? "");
+    const code = el("code", missing || (blank && !scope.mask) ? "empty" : "", text);
+    if (!missing && !scope.mask) {
+      code.title = scope.value ?? "";
+    }
+    value.append(code);
+    if (scope.inherited) {
+      value.append(el("span", "note", "同全局"));
+    }
+    row.append(value);
+    if (!missing) {
+      const saved = live ?? scope.value ?? "";
+      row.append(button("复制", "copy", () => void copyText(saved).then(() => notify("已复制"))));
+    }
+    box.append(row);
+  }
+  box.hidden = false;
+  placeVarPreview(box, anchor);
+}
+
+function showVarPreview(system: SystemItem, name: string, anchor: HTMLElement) {
+  window.clearTimeout(varPreviewHide);
+  const key = `${system.id}\0${name}`;
+  if (varPreviewKey === key && varPreview && !varPreview.hidden) {
+    if (varPreviewAnchor !== anchor) {
+      varPreviewAnchor = anchor;
+      placeVarPreview(varPreview, anchor);
+    }
+    return;
+  }
+  window.clearTimeout(varPreviewShow);
+  varPreviewShow = window.setTimeout(() => {
+    varPreviewKey = key;
+    varPreviewAnchor = anchor;
+    paintVarPreview(system, name, anchor);
+  }, 100);
+}
+
+function hideVarPreview() {
+  window.clearTimeout(varPreviewShow);
+  window.clearTimeout(varPreviewHide);
+  varPreviewKey = "";
+  varPreviewAnchor = null;
+  if (varPreview) {
+    varPreview.hidden = true;
+  }
+}
+
+function scheduleHideVarPreview() {
+  window.clearTimeout(varPreviewShow);
+  window.clearTimeout(varPreviewHide);
+  varPreviewHide = window.setTimeout(hideVarPreview, 200);
+}
+
+function bindVarPreview(node: HTMLElement, system: SystemItem, name: string) {
+  node.addEventListener("mouseenter", () => showVarPreview(system, name, node));
+  node.addEventListener("mouseleave", () => scheduleHideVarPreview());
+}
+
+function replaceRange(content: string, start: number, end: number, selected: string, name: string): string | null {
+  let from = start;
+  let to = end;
+  if (content.slice(from, to) !== selected) {
+    from = content.indexOf(selected);
+    if (from < 0) {
+      return null;
+    }
+    to = from + selected.length;
+  }
+  if (variableOverlap(content, from, to) === "inside") {
+    return null;
+  }
+  return `${content.slice(0, from)}{{${name}}}${content.slice(to)}`;
+}
+
+function makeVariable(
+  system: SystemItem,
+  api: ApiItem,
+  item: CaseItem,
+  selected: string,
+  name: string,
+  range: { start: number; end: number },
+) {
   const cleanName = name.trim().replace(/[^A-Za-z0-9_.-]/g, "");
-  if (!cleanName || !selected) {
+  if (!cleanName) {
+    notify("变量名只保留字母、数字、_ . -");
     return;
   }
-  const envId = currentEnvId(system);
-  if (system.variables.some((item) => item.name === cleanName && (item.envId || "") === envId)) {
-    notify(`已有变量 {{${cleanName}}}`);
+  if (!selected) {
     return;
   }
-  let count = 0;
-  for (const api of system.apis) {
-    for (const item of api.cases) {
-      count += item.content.split(selected).length - 1;
+  let from = range.start;
+  let to = range.end;
+  if (item.content.slice(from, to) !== selected) {
+    from = item.content.indexOf(selected);
+    if (from < 0) {
+      return;
+    }
+    to = from + selected.length;
+  }
+  if (variableOverlap(item.content, from, to) === "inside") {
+    notify("这段文字已经在变量里，不能再套一层");
+    return;
+  }
+  const named = system.variables.find((variable) => variable.name.toLowerCase() === cleanName.toLowerCase());
+  const finalName = named?.name ?? cleanName;
+  const wrappedName = selected.match(/^\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}$/)?.[1] ?? "";
+  let total = 0;
+  for (const current of system.apis) {
+    for (const caseItem of current.cases) {
+      total += wrappedName
+        ? renameVariable(caseItem.content, wrappedName, finalName).count
+        : replaceTextWithVariable(caseItem.content, selected, finalName).count;
     }
   }
-  const scopeName = system.links.find((link) => link.id === envId)?.label;
-  void confirmAction(`将把 ${count} 处相同文本替换为 {{${cleanName}}}，并加到${scopeName ? `环境 ${scopeName}` : "全局变量"}。继续？`, "设为变量").then((ok) => {
+  const envs = [
+    { id: "", label: "全局" },
+    ...system.links.filter((link) => link.kind === "env").map((link) => ({ id: link.id, label: link.label || "未命名" })),
+  ];
+  const form = document.querySelector("#ask-form") as HTMLElement;
+  const envBox = document.querySelector("#ask-env") as HTMLElement;
+  const all = document.querySelector("#ask-all") as HTMLInputElement;
+  const hint = document.querySelector("#ask-var-hint") as HTMLElement;
+  const valueOf = (envId: string) => {
+    const own = variableInScope(system, finalName, envId)?.value;
+    if (own !== undefined) {
+      return own;
+    }
+    if (!wrappedName) {
+      return selected;
+    }
+    return variableInScope(system, wrappedName, envId)?.value ?? "";
+  };
+  const checkedRows = () =>
+    [...envBox.querySelectorAll<HTMLElement>(".ask-env")]
+      .map((row) => {
+        const box = row.querySelector<HTMLInputElement>("input[type='checkbox']");
+        const field = row.querySelector<HTMLInputElement>("input[type='text']");
+        return box?.checked && field ? { envId: box.value, value: field.value } : null;
+      })
+      .filter((row): row is { envId: string; value: string } => row !== null);
+  const paintHint = () => {
+    hint.textContent = all.checked
+      ? wrappedName
+        ? `将替换本系统 ${total} 处 {{${wrappedName}}}`
+        : `将替换本系统 ${total} 处相同文本`
+      : "只替换当前选中的这一处";
+  };
+  void confirmForm("设为变量", () => {
+    form.hidden = false;
+    envBox.replaceChildren();
+    const initial = currentEnvId(system);
+    const picked = envs.some((env) => env.id === initial) ? initial : "";
+    for (const env of envs) {
+      const row = el("div", "ask-env");
+      const label = el("label", "check");
+      const input = el("input");
+      input.type = "checkbox";
+      input.value = env.id;
+      input.checked = env.id === picked;
+      label.append(input, el("span", "", env.label));
+      const field = el("input");
+      field.type = "text";
+      field.spellcheck = false;
+      field.autocomplete = "off";
+      field.value = valueOf(env.id);
+      row.append(label, field);
+      envBox.append(row);
+    }
+    all.checked = false;
+    paintHint();
+    all.onchange = paintHint;
+    envBox.querySelector<HTMLInputElement>("input[type='text']")?.focus();
+  }).then((ok) => {
     if (!ok) {
       return;
     }
-    for (const api of system.apis) {
-      for (const item of api.cases) {
-        if (item.content.includes(selected)) {
-          item.content = item.content.split(selected).join(`{{${cleanName}}}`);
-          touchCase(api, item);
-        }
+    const rows = checkedRows();
+    if (rows.length === 0) {
+      notify("先勾选环境");
+      return;
+    }
+    const applyAll = all.checked;
+    for (const row of rows) {
+      const scope = variableInScope(system, finalName, row.envId);
+      if (scope) {
+        scope.value = row.value;
+      } else {
+        system.variables.push({
+          id: uid(),
+          name: finalName,
+          value: row.value,
+          secret: named?.secret ?? /token|cookie|secret|password|auth/i.test(finalName),
+          envId: row.envId,
+        });
       }
     }
-    system.variables.push({
-      id: uid(),
-      name: cleanName,
-      value: selected,
-      secret: /token|cookie|secret|password|auth/i.test(cleanName),
-      envId,
-    });
+    let replaced = 0;
+    if (applyAll) {
+      for (const current of system.apis) {
+        for (const caseItem of current.cases) {
+          const next = wrappedName
+            ? renameVariable(caseItem.content, wrappedName, finalName)
+            : replaceTextWithVariable(caseItem.content, selected, finalName);
+          if (next.count === 0) {
+            continue;
+          }
+          caseItem.content = next.content;
+          touchCase(current, caseItem);
+          replaced += next.count;
+        }
+      }
+    } else {
+      const next = replaceRange(item.content, range.start, range.end, selected, finalName);
+      if (next !== null && next !== item.content) {
+        item.content = next;
+        touchCase(api, item);
+        replaced = 1;
+      }
+    }
     scheduleSave();
     renderDetail();
-    notify(`已替换 ${count} 处`);
+    const scopeName = rows
+      .map((row) => (row.envId ? system.links.find((link) => link.id === row.envId)?.label || "该环境" : "全局"))
+      .join("、");
+    notify(replaced > 0 ? `已保存到${scopeName}，替换 ${replaced} 处` : `已保存到${scopeName}`);
   });
 }
 
@@ -4011,18 +4404,42 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
       button.style.top = `${rect.top - hostTop - leading}px`;
     });
   };
+  let picked: { start: number; end: number; text: string } | null = null;
+  let expandingSelection = false;
+  let activeVarBar: HTMLElement | null = null;
+  let pendingEdit: { previous: string; next: string } | null = null;
+  const selectionHeld = () => {
+    if (!picked || !activeVarBar || activeVarBar.hidden) {
+      return false;
+    }
+    if (area.value.slice(picked.start, picked.end) !== picked.text) {
+      return false;
+    }
+    const focus = document.activeElement;
+    if (activeVarBar.contains(focus)) {
+      return true;
+    }
+    const ask = document.querySelector("#ask") as HTMLElement | null;
+    return Boolean(ask && !ask.hidden && ask.contains(focus));
+  };
   const paint = () => {
-    highlight.innerHTML = highlightShell(area.value, definedVariables(system));
+    const hold = selectionHeld() ? picked : null;
+    highlight.innerHTML = highlightShell(area.value, definedVariables(system), hold);
     syncRunButtons();
     placeRunButtons();
     requestAnimationFrame(placeRunButtons);
   };
   area.addEventListener("focus", () => {
+    pendingEdit = null;
     if (!caseEdited) {
       caseSnapshot = area.value;
     }
+    paint();
   });
   area.addEventListener("input", () => {
+    if (picked && area.value.slice(picked.start, picked.end) !== picked.text) {
+      picked = null;
+    }
     caseEdited = true;
     item.content = area.value;
     formatBackup.delete(item.id);
@@ -4042,87 +4459,341 @@ function renderCase(system: SystemItem, api: ApiItem, item: CaseItem, index: num
   paint();
 
   const varBar = el("div", "var-bar");
+  activeVarBar = varBar;
   varBar.hidden = true;
+  const varHint = el("span", "hint");
+  const varNameWrap = el("div", "var-name");
   const varName = el("input");
   varName.placeholder = "变量名，如 token";
-  const varOk = button("设为变量", "primary", () => {
-    const selected = area.value.slice(area.selectionStart, area.selectionEnd);
-    makeVariable(system, selected, varName.value);
+  varName.autocomplete = "off";
+  varName.spellcheck = false;
+  varName.autocapitalize = "off";
+  const suggest = el("div", "var-suggest");
+  suggest.hidden = true;
+  let suggestClosed = false;
+  let outsideWatching = false;
+  const suggestMatches = (query: string): VariableItem[] => {
+    const q = query.trim().toLowerCase();
+    const list = variablesFor(system).filter((item) => !q || item.name.toLowerCase().includes(q));
+    list.sort((a, b) => {
+      const an = a.name.toLowerCase();
+      const bn = b.name.toLowerCase();
+      const ap = q && an.startsWith(q) ? 0 : 1;
+      const bp = q && bn.startsWith(q) ? 0 : 1;
+      if (ap !== bp) {
+        return ap - bp;
+      }
+      return an.localeCompare(bn, "zh");
+    });
+    return list.slice(0, 8);
+  };
+  const refreshSuggest = () => {
+    suggest.replaceChildren();
+    const typed = varName.value.trim();
+    const matches = suggestMatches(typed);
+    const onlyExact = matches.length === 1 && matches[0]?.name === typed;
+    if (suggestClosed || document.activeElement !== varName || matches.length === 0 || onlyExact) {
+      suggest.hidden = true;
+      return;
+    }
+    const close = button("×", "close", () => {
+      suggestClosed = true;
+      suggest.hidden = true;
+    }, "关闭");
+    for (const variable of matches) {
+      const item = button(variable.name, "item", () => {
+        varName.value = variable.name;
+        suggestClosed = true;
+        suggest.hidden = true;
+        varName.focus();
+      });
+      const scope = variable.envId ? "环境变量" : "全局变量";
+      item.title = variable.secret ? `${scope} · 敏感` : `${scope} · ${clipText(variable.value, 80)}`;
+      suggest.append(item);
+    }
+    suggest.append(close);
+    suggest.hidden = false;
+  };
+  suggest.addEventListener("mousedown", (event) => {
+    event.preventDefault();
   });
+  varName.addEventListener("input", () => {
+    suggestClosed = false;
+    refreshSuggest();
+  });
+  varName.addEventListener("focus", () => {
+    suggestClosed = false;
+    refreshSuggest();
+  });
+  varName.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (document.activeElement !== varName && !suggest.contains(document.activeElement)) {
+        suggest.hidden = true;
+      }
+    }, 0);
+  });
+  varNameWrap.append(varName, suggest);
+  const varOk = button("设为变量", "primary", () => {
+    const selection = picked;
+    if (!selection?.text) {
+      notify("先选中要替换的文字");
+      return;
+    }
+    if (!varName.value.trim()) {
+      varName.focus();
+      return;
+    }
+    makeVariable(system, api, item, selection.text, varName.value, { start: selection.start, end: selection.end });
+  }, "把选中文本设为变量");
+  const finishCaseEdit = (previous: string, next: string) => {
+    if (!area.isConnected) {
+      return;
+    }
+    if (skipCaseLog.delete(item.id)) {
+      return;
+    }
+    if (!api.cases.some((caseItem) => caseItem.id === item.id)) {
+      return;
+    }
+    if (!next.trim()) {
+      if (caseEdited && previous.trim()) {
+        recordLog({
+          category: "delete",
+          action: "删除用例",
+          system,
+          api,
+          detail: caseTitle(previous, index),
+          result: previous,
+        });
+      }
+      if (!previous.trim() || caseEdited) {
+        const focusId = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.case ?? "" : "";
+        api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
+        touchApi(api);
+        scheduleSave();
+        renderDetail();
+        if (focusId) {
+          focusCase(focusId);
+        }
+      }
+      return;
+    }
+    if (!caseEdited || sameText(previous, next)) {
+      return;
+    }
+    recordLog({
+      category: previous.trim() ? "update" : "create",
+      action: previous.trim() ? "修改用例" : "新增用例",
+      system,
+      api,
+      detail: caseTitle(next, index),
+      result: previous.trim() ? caseChange(previous, next) : next,
+    });
+    caseSnapshot = next;
+    caseEdited = false;
+  };
+  let onPointerDown: (event: PointerEvent) => void = () => {};
+  const unwatchOutside = () => {
+    if (!outsideWatching) {
+      return;
+    }
+    outsideWatching = false;
+    document.removeEventListener("pointerdown", onPointerDown, true);
+  };
+  const hideVarBar = () => {
+    varBar.hidden = true;
+    suggest.hidden = true;
+    unwatchOutside();
+  };
+  const dismissVarBar = () => {
+    if (!varBar.isConnected) {
+      unwatchOutside();
+      return;
+    }
+    picked = null;
+    hideVarBar();
+    paint();
+    const pending = pendingEdit;
+    pendingEdit = null;
+    if (pending) {
+      finishCaseEdit(pending.previous, pending.next);
+    }
+  };
+  onPointerDown = (event: PointerEvent) => {
+    if (!varBar.isConnected) {
+      unwatchOutside();
+      return;
+    }
+    if (event.button !== 0) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof Node) || varBar.contains(target) || target === area) {
+      return;
+    }
+    const ask = document.querySelector("#ask") as HTMLElement | null;
+    if (ask && !ask.hidden && ask.contains(target)) {
+      return;
+    }
+    dismissVarBar();
+  };
+  const watchOutside = () => {
+    if (outsideWatching) {
+      return;
+    }
+    outsideWatching = true;
+    document.addEventListener("pointerdown", onPointerDown, true);
+  };
+  const leaveIfIdle = () => {
+    if (!area.isConnected) {
+      return;
+    }
+    if (document.activeElement === area || selectionHeld()) {
+      if (selectionHeld()) {
+        paint();
+      }
+      return;
+    }
+    dismissVarBar();
+  };
   varName.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
+      const typed = varName.value.trim().replace(/[^A-Za-z0-9_.-]/g, "");
+      const exact = suggestMatches(typed).find((item) => item.name.toLowerCase() === typed.toLowerCase());
+      if (exact) {
+        varName.value = exact.name;
+      }
       varOk.click();
     }
     if (event.key === "Escape") {
-      varBar.hidden = true;
-      area.focus();
+      event.preventDefault();
+      if (!suggest.hidden) {
+        suggestClosed = true;
+        suggest.hidden = true;
+        return;
+      }
+      dismissVarBar();
+      if (area.isConnected) {
+        area.focus();
+      }
     }
   });
-  const varHint = el("span", "hint");
-  varBar.append(varHint, varName, varOk);
-  const checkSelection = () => {
-    const selected = area.value.slice(area.selectionStart, area.selectionEnd);
-    const usable = selected.length >= 3 && !selected.includes("\n");
-    varBar.hidden = !usable;
-    if (usable) {
-      varHint.textContent = `选中「${selected.length > 24 ? `${selected.slice(0, 24)}…` : selected}」`;
+  varBar.append(varHint, varNameWrap, varOk);
+  const captureSelection = () => {
+    const start = area.selectionStart ?? 0;
+    const end = area.selectionEnd ?? 0;
+    const from = Math.min(start, end);
+    const to = Math.max(start, end);
+    const token = enclosingVariable(area.value, from, to);
+    if (token) {
+      picked = { start: token.start, end: token.end, text: token.text };
+      return;
+    }
+    const text = area.value.slice(from, to);
+    if (text.length >= 3 && !text.includes("\n") && variableOverlap(area.value, from, to) !== "inside") {
+      picked = { start: from, end: to, text };
     }
   };
-  area.addEventListener("select", checkSelection);
-  area.addEventListener("mouseup", checkSelection);
-  area.addEventListener("keyup", checkSelection);
+  varBar.addEventListener("mousedown", (event) => {
+    captureSelection();
+    const target = event.target;
+    const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+    if (!element?.closest("input, button, textarea")) {
+      event.preventDefault();
+    }
+  }, true);
+  varBar.addEventListener("focusin", () => {
+    paint();
+  });
+  const showPicked = (start: number, end: number, text: string, name = "") => {
+    const changed = !picked || picked.start !== start || picked.end !== end || picked.text !== text;
+    picked = { start, end, text };
+    varBar.hidden = false;
+    const label = text.length > 24 ? `${text.slice(0, 24)}…` : text;
+    varHint.textContent = `选中「${label}」`;
+    if (changed && name) {
+      varName.value = name;
+      suggestClosed = true;
+    }
+    watchOutside();
+  };
+  const rememberSelection = (allowClear: boolean, hitName = "") => {
+    if (expandingSelection || document.activeElement !== area) {
+      return;
+    }
+    const start = area.selectionStart ?? 0;
+    const end = area.selectionEnd ?? 0;
+    const from = Math.min(start, end);
+    const to = Math.max(start, end);
+    const token = enclosingVariable(area.value, from, to, allowClear ? hitName : "");
+    if (token) {
+      const exact = from === token.start && to === token.end;
+      if (!exact && !allowClear) {
+        return;
+      }
+      if (!exact) {
+        expandingSelection = true;
+        area.setSelectionRange(token.start, token.end);
+        expandingSelection = false;
+      }
+      showPicked(token.start, token.end, token.text, token.name);
+      return;
+    }
+    const text = area.value.slice(from, to);
+    if (text.length < 3 || text.includes("\n") || variableOverlap(area.value, from, to) === "inside") {
+      if (!allowClear) {
+        return;
+      }
+      picked = null;
+      hideVarBar();
+      return;
+    }
+    showPicked(from, to, text);
+  };
+  const variableUnder = (x: number, y: number): HTMLElement | null => {
+    const previous = area.style.pointerEvents;
+    area.style.pointerEvents = "none";
+    try {
+      const hit = document.elementFromPoint(x, y);
+      const span = hit instanceof Element ? hit.closest(".sh-var, .sh-var-missing") : null;
+      return span instanceof HTMLElement ? span : null;
+    } finally {
+      area.style.pointerEvents = previous;
+    }
+  };
+  area.addEventListener("mousemove", (event) => {
+    if (event.buttons !== 0) {
+      hideVarPreview();
+      return;
+    }
+    const span = variableUnder(event.clientX, event.clientY);
+    const varName = span?.dataset.name ?? "";
+    if (!span || !varName) {
+      scheduleHideVarPreview();
+      return;
+    }
+    showVarPreview(system, varName, span);
+  });
+  area.addEventListener("mouseleave", () => scheduleHideVarPreview());
+  area.addEventListener("mousedown", () => hideVarPreview());
+  area.addEventListener("select", () => rememberSelection(false));
+  area.addEventListener("mouseup", (event) => {
+    const hitName = variableUnder(event.clientX, event.clientY)?.dataset.name ?? "";
+    rememberSelection(true, hitName);
+    requestAnimationFrame(() => {
+      if (document.activeElement === area) {
+        rememberSelection(true, hitName);
+      }
+    });
+  });
+  area.addEventListener("keyup", () => rememberSelection(true));
   area.addEventListener("blur", () => {
-    const previous = caseSnapshot;
-    const next = area.value;
-    window.setTimeout(() => {
-      if (document.activeElement === area || varBar.contains(document.activeElement)) {
-        return;
-      }
-      varBar.hidden = true;
-      if (skipCaseLog.delete(item.id)) {
-        return;
-      }
-      if (!api.cases.some((caseItem) => caseItem.id === item.id)) {
-        return;
-      }
-      if (!next.trim()) {
-        if (caseEdited && previous.trim()) {
-          recordLog({
-            category: "delete",
-            action: "删除用例",
-            system,
-            api,
-            detail: caseTitle(previous, index),
-            result: previous,
-          });
-        }
-        if (!previous.trim() || caseEdited) {
-          const focusId = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.case ?? "" : "";
-          api.cases = api.cases.filter((caseItem) => caseItem.id !== item.id);
-          touchApi(api);
-          scheduleSave();
-          renderDetail();
-          if (focusId) {
-            focusCase(focusId);
-          }
-        }
-        return;
-      }
-      if (!caseEdited || sameText(previous, next)) {
-        return;
-      }
-      recordLog({
-        category: previous.trim() ? "update" : "create",
-        action: previous.trim() ? "修改用例" : "新增用例",
-        system,
-        api,
-        detail: caseTitle(next, index),
-        result: previous.trim() ? caseChange(previous, next) : next,
-      });
-      caseSnapshot = next;
-      caseEdited = false;
-    }, 150);
+    pendingEdit = { previous: caseSnapshot, next: area.value };
+    window.setTimeout(leaveIfIdle, 150);
+  });
+  varBar.addEventListener("focusout", () => {
+    window.setTimeout(leaveIfIdle, 150);
   });
 
   view.append(highlight, area);
@@ -5246,11 +5917,18 @@ function initAppearance() {
     event.preventDefault();
     event.stopPropagation();
   }, true);
-  document.addEventListener("click", () => {
+  document.addEventListener("click", (event) => {
     closePops();
     closeFinder();
+    const target = event.target;
+    if (!(target instanceof Node) || !varPreview?.contains(target)) {
+      hideVarPreview();
+    }
   });
-  detail.addEventListener("scroll", () => closePops(), { passive: true });
+  detail.addEventListener("scroll", () => {
+    closePops();
+    hideVarPreview();
+  }, { passive: true });
   systemList.addEventListener("scroll", () => closePops(), { passive: true });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {

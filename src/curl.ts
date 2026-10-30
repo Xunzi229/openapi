@@ -1,3 +1,4 @@
+import { isCall, runCall } from "./fns";
 import type { LinkItem, VariableItem } from "./types";
 
 export interface Token {
@@ -333,19 +334,144 @@ function safeDecode(text: string): string {
 
 /* 变量 */
 
-export const VARIABLE_PATTERN = /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g;
+export const VARIABLE_PATTERN = /\{\{\s*(\$[A-Za-z][A-Za-z0-9_]*(?::[^{}]*)?|[A-Za-z0-9_.-]+)\s*\}\}/g;
 
-export function substitute(content: string, variables: VariableItem[]): string {
+export interface VariableToken {
+  start: number;
+  end: number;
+  text: string;
+  name: string;
+}
+
+export function variableTokens(content: string): VariableToken[] {
+  const pattern = new RegExp(VARIABLE_PATTERN.source, "g");
+  const tokens: VariableToken[] = [];
+  for (const match of content.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const text = match[0];
+    tokens.push({ start, end: start + text.length, text, name: match[1] ?? "" });
+  }
+  return tokens;
+}
+
+export function substitute(content: string, variables: VariableItem[], now = new Date()): string {
   const map = new Map(variables.map((item) => [item.name, item.value]));
-  return content.replace(VARIABLE_PATTERN, (whole, name: string) => (map.has(name) ? (map.get(name) ?? "") : whole));
+  const pattern = new RegExp(VARIABLE_PATTERN.source, "g");
+  return content.replace(pattern, (whole, name: string) => {
+    const direct = runCall(name, now);
+    if (direct !== null) {
+      return direct;
+    }
+    if (!map.has(name)) {
+      return whole;
+    }
+    const value = map.get(name) ?? "";
+    return runCall(value.trim(), now) ?? value;
+  });
+}
+
+/** 把系统里相同文本换成 {{name}}。已经在 {{变量}} 里的不再改。 */
+/** 选区落在已有 {{变量}} 内部时不能再包一层。正好选中整个变量则不算嵌套。 */
+export function variableOverlap(content: string, start: number, end: number): "none" | "inside" | "exact" {
+  if (end <= start) {
+    return "none";
+  }
+  let exact = false;
+  for (const token of variableTokens(content)) {
+    if (end <= token.start || start >= token.end) {
+      continue;
+    }
+    if (start === token.start && end === token.end) {
+      exact = true;
+      continue;
+    }
+    return "inside";
+  }
+  return exact ? "exact" : "none";
+}
+
+/** 光标或选区在某个 {{变量}} 内部时，返回这整段。点在变量上、光标落在边界时用 hitName 接住。 */
+export function enclosingVariable(
+  content: string,
+  start: number,
+  end: number,
+  hitName = "",
+): { start: number; end: number; text: string; name: string } | null {
+  const from = Math.min(start, end);
+  const to = Math.max(start, end);
+  const caret = from === to;
+  let nearest: { start: number; end: number; text: string; name: string } | null = null;
+  let nearestDist = Number.POSITIVE_INFINITY;
+  for (const token of variableTokens(content)) {
+    const tokenStart = token.start;
+    const tokenEnd = token.end;
+    if (caret && from > tokenStart && from < tokenEnd) {
+      return token;
+    }
+    if (!caret && from >= tokenStart && to <= tokenEnd) {
+      return token;
+    }
+    if (!caret || !hitName || token.name !== hitName) {
+      continue;
+    }
+    const dist = from < tokenStart ? tokenStart - from : from > tokenEnd ? from - tokenEnd : 0;
+    if (dist < nearestDist) {
+      nearest = token;
+      nearestDist = dist;
+    }
+  }
+  if (caret && hitName && nearest && nearestDist <= 1) {
+    return nearest;
+  }
+  return null;
+}
+
+export function replaceTextWithVariable(content: string, selected: string, name: string): { content: string; count: number } {
+  if (!selected || !/^[A-Za-z0-9_.-]+$/.test(name)) {
+    return { content, count: 0 };
+  }
+  const token = `{{${name}}}`;
+  let count = 0;
+  let next = "";
+  let index = 0;
+  while (index < content.length) {
+    if (content.startsWith("{{", index)) {
+      const end = content.indexOf("}}", index + 2);
+      if (end !== -1) {
+        next += content.slice(index, end + 2);
+        index = end + 2;
+        continue;
+      }
+    }
+    if (content.startsWith(selected, index)) {
+      next += token;
+      index += selected.length;
+      count += 1;
+      continue;
+    }
+    next += content[index];
+    index += 1;
+  }
+  return { content: next, count };
+}
+
+export function renameVariable(content: string, fromName: string, toName: string): { content: string; count: number } {
+  if (!fromName || !/^[A-Za-z0-9_.-]+$/.test(toName) || fromName.toLowerCase() === toName.toLowerCase()) {
+    return { content, count: 0 };
+  }
+  let count = 0;
+  const next = content.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (whole, name: string) => {
+    if (name.toLowerCase() !== fromName.toLowerCase()) {
+      return whole;
+    }
+    count += 1;
+    return `{{${toName}}}`;
+  });
+  return { content: next, count };
 }
 
 export function variableNames(content: string): string[] {
-  const names: string[] = [];
-  for (const match of content.matchAll(VARIABLE_PATTERN)) {
-    names.push(match[1]);
-  }
-  return names;
+  return variableTokens(content).map((token) => token.name);
 }
 
 /* 主机 */
@@ -509,16 +635,41 @@ function escapeHtml(text: string): string {
 
 function markVariables(escaped: string, defined: Set<string>): string {
   return escaped.replace(VARIABLE_PATTERN, (whole, name: string) => {
-    const cls = defined.has(name) ? "sh-var" : "sh-var-missing";
-    return `<span class="${cls}">${whole}</span>`;
+    const cls = defined.has(name) || isCall(name) ? "sh-var" : "sh-var-missing";
+    return `<span class="${cls}" data-name="${name}">${whole}</span>`;
   });
 }
 
-export function highlightShell(source: string, defined: Set<string>): string {
+export function highlightShell(
+  source: string,
+  defined: Set<string>,
+  selection?: { start: number; end: number } | null,
+): string {
   if (!source) {
     return '<span class="sh-placeholder">这一条用例，通常是一条完整的 curl</span>\n';
   }
   const emit = (text: string) => markVariables(escapeHtml(text), defined);
+  const selStart = selection && selection.end > selection.start ? selection.start : -1;
+  const selEnd = selection && selection.end > selection.start ? selection.end : -1;
+  const emitRange = (start: number, end: number): string => {
+    if (end <= start) {
+      return "";
+    }
+    if (selStart < 0 || end <= selStart || start >= selEnd) {
+      return emit(source.slice(start, end));
+    }
+    const left = Math.max(start, selStart);
+    const right = Math.min(end, selEnd);
+    let html = "";
+    if (left > start) {
+      html += emit(source.slice(start, left));
+    }
+    html += `<span class="shell-selection">${emit(source.slice(left, right))}</span>`;
+    if (right < end) {
+      html += emit(source.slice(right, end));
+    }
+    return html;
+  };
   let html = "";
   let index = 0;
   let lineStart = true;
@@ -526,14 +677,14 @@ export function highlightShell(source: string, defined: Set<string>): string {
     const ch = source[index];
     if (ch === "'" || ch === '"') {
       const end = endOfQuote(source, index);
-      html += `<span class="sh-str">${emit(source.slice(index, end))}</span>`;
+      html += `<span class="sh-str">${emitRange(index, end)}</span>`;
       index = end;
       continue;
     }
     if (ch === "#") {
       const newline = source.indexOf("\n", index);
       const end = newline === -1 ? source.length : newline;
-      html += `<span class="sh-comment">${escapeHtml(source.slice(index, end))}</span>`;
+      html += `<span class="sh-comment">${emitRange(index, end)}</span>`;
       index = end;
       continue;
     }
@@ -548,13 +699,14 @@ export function highlightShell(source: string, defined: Set<string>): string {
         html += '<span class="curl-mark">\u200b</span>';
       }
       lineStart = false;
-      html += cls ? `<span class="${cls}">${emit(word)}</span>` : emit(word);
+      const body = emitRange(start, index);
+      html += cls ? `<span class="${cls}">${body}</span>` : body;
       continue;
     }
     if (ch === "\n") {
       lineStart = true;
     }
-    html += escapeHtml(ch);
+    html += emitRange(index, index + 1);
     index += 1;
   }
   return html.endsWith("\n") ? html : `${html}\n`;

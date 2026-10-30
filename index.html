@@ -128,6 +128,17 @@
       <div class="ask-box">
         <h3 id="ask-title"></h3>
         <p id="ask-text"></p>
+        <div id="ask-form" class="ask-form" hidden>
+          <div class="ask-field">
+            <span>环境</span>
+            <div id="ask-env" class="ask-envs"></div>
+          </div>
+          <label class="check">
+            <input id="ask-all" type="checkbox" />
+            应用到全部接口
+          </label>
+          <div id="ask-var-hint" class="ask-hint"></div>
+        </div>
         <div class="row">
           <button id="ask-cancel" type="button" class="secondary">取消</button>
           <button id="ask-ok" type="button" class="primary">确定</button>
@@ -153,7 +164,7 @@
         <div class="field">
           <span>业务域</span>
           <div id="domain-picks" class="picks"></div>
-          <input name="domain" type="text" placeholder="或输入新的业务域，留空按名称归类" autocomplete="off" spellcheck="false" />
+          <input name="domain" type="text" placeholder="或输入新的业务域，留空归到其他" autocomplete="off" spellcheck="false" />
         </div>
         <div class="row">
           <button id="system-cancel" type="button" class="secondary">取消</button>

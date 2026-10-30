@@ -119,6 +119,10 @@ export function confirmAction(text: string, title = "确认"): Promise<boolean> 
   return ask({ title, text, confirm: "继续", cancel: "取消" });
 }
 
+export function confirmForm(title: string, prepare: () => void): Promise<boolean> {
+  return ask({ title, text: "", confirm: "确定", cancel: "取消", prepare });
+}
+
 export function showMessage(text: string, title = "OpenApi"): Promise<void> {
   return ask({ title, text, confirm: "知道了", cancel: "" }).then(() => undefined);
 }
@@ -129,6 +133,7 @@ interface AskOptions {
   confirm: string;
   cancel?: string;
   danger?: boolean;
+  prepare?: () => void;
 }
 
 let askResolve: ((ok: boolean) => void) | null = null;
@@ -144,12 +149,20 @@ function ask(options: AskOptions): Promise<boolean> {
   }
   title.textContent = options.title;
   text.textContent = options.text;
+  text.hidden = options.text.length === 0;
+  const form = document.querySelector("#ask-form") as HTMLElement | null;
+  if (form) {
+    form.hidden = true;
+  }
   ok.textContent = options.confirm;
   ok.className = options.danger ? "danger" : "primary";
   cancel.hidden = !options.cancel;
   cancel.textContent = options.cancel ?? "取消";
   root.hidden = false;
-  ok.focus();
+  options.prepare?.();
+  if (!options.prepare) {
+    ok.focus();
+  }
   return new Promise((resolve) => {
     askResolve = resolve;
   });
@@ -157,6 +170,10 @@ function ask(options: AskOptions): Promise<boolean> {
 
 export function finishAsk(ok: boolean) {
   const root = document.querySelector("#ask") as HTMLElement | null;
+  const form = document.querySelector("#ask-form") as HTMLElement | null;
+  if (form) {
+    form.hidden = true;
+  }
   if (root) {
     root.hidden = true;
   }

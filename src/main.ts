@@ -800,14 +800,9 @@ function domainGroup(domain: string, count: number, folded: boolean): HTMLElemen
   if (domainView === domain) {
     title.classList.add("on");
   }
-  title.addEventListener("click", (event) => {
-    const onChevron = event.target instanceof Element && Boolean(event.target.closest("i"));
-    if (onChevron || !editable) {
-      toggleCollapsed(domain);
-      renderSidebar();
-      return;
-    }
-    showDomain(domain);
+  title.addEventListener("click", () => {
+    toggleCollapsed(domain);
+    renderSidebar();
   });
   if (editable) {
     title.addEventListener("contextmenu", (event) => {
